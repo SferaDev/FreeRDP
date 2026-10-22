@@ -633,9 +633,12 @@ static int videotoolbox_decompress_to_rgb(H264_CONTEXT* WINPR_RESTRICT h264,
 			const vImage_Buffer cr = { WINPR_CAST_CONST_PTR_AWAY(yuv[2], void*), (height + 1) / 2,
 			                           (width + 1) / 2, h264->iStride[2] };
 			const vImage_Buffer out = { dst, height, width, nDstStep };
-			/* Internal tiling costs more CPU than it saves latency at these sizes. */
+			/* Tiling costs more than it saves on small rects; a full Retina frame
+			 * converted on one core takes over 10 ms and caps the frame rate. */
+			const vImage_Flags flags =
+			    (1ULL * width * height >= 512ULL * 512ULL) ? kvImageNoFlags : kvImageDoNotTile;
 			if (vImageConvert_420Yp8_Cb8_Cr8ToARGB8888(&y, &cb, &cr, &out, &sys->yuvToRgb, map,
-			                                           0xFF, kvImageDoNotTile) == kvImageNoError)
+			                                           0xFF, flags) == kvImageNoError)
 				continue;
 		}
 
