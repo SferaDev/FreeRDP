@@ -244,6 +244,7 @@ class SdlContext
 	std::map<SDL_WindowID, SdlWindow> _windows;
 	std::map<SDL_DisplayID, std::pair<SDL_Rect, SDL_Rect>> _offsets;
 
+	bool _windowsHiddenForRail = false;
 	uint32_t _windowWidth = 0;
 	uint32_t _windowHeight = 0;
 	WinPREvent _windowsCreatedEvent;

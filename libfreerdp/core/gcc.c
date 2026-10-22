@@ -2332,6 +2332,12 @@ BOOL gcc_write_client_monitor_extended_data(wStream* s, const rdpMcs* mcs)
 		for (UINT32 i = 0; i < settings->MonitorCount; i++)
 		{
 			const rdpMonitor* current = &settings->MonitorDefArray[i];
+			WLog_Print(mcs->log, WLOG_DEBUG,
+			           "MonitorAttributes[%" PRIu32 "]: physical=%" PRIu32 "x%" PRIu32
+			           ", orientation=%" PRIu32 ", desktopScale=%" PRIu32 ", deviceScale=%" PRIu32,
+			           i, current->attributes.physicalWidth, current->attributes.physicalHeight,
+			           current->attributes.orientation, current->attributes.desktopScaleFactor,
+			           current->attributes.deviceScaleFactor);
 			Stream_Write_UINT32(s, current->attributes.physicalWidth);      /* physicalWidth */
 			Stream_Write_UINT32(s, current->attributes.physicalHeight);     /* physicalHeight */
 			Stream_Write_UINT32(s, current->attributes.orientation);        /* orientation */

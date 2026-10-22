@@ -932,6 +932,15 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 	if (!isConnected())
 		return true;
 
+	/* A hidden or occluded window (e.g. a full screen space that is not shown) is not drawn,
+	 * and repainted completely once it is visible again. */
+	const auto hidden = SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED;
+	if ((SDL_GetWindowFlags(window.window()) & hidden) != 0)
+	{
+		window.setStale(true);
+		return true;
+	}
+
 	auto gdi = context()->gdi;
 	WINPR_ASSERT(gdi);
 
@@ -955,18 +964,52 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 
 		_localScale = { static_cast<float>(size.w) / static_cast<float>(gdi->width),
 			            static_cast<float>(size.h) / static_cast<float>(gdi->height) };
-		if (!window.drawScaledRects(surface, _localScale, rects))
+		if (!window.drawScaledRects(surface, _localScale,
+		                            window.stale() ? std::vector<SDL_Rect>{} : rects))
 			return false;
 	}
 	else
 	{
 		SDL_Point offset{ 0, 0 };
+		SDL_Rect area = { 0, 0, size.w, size.h };
 		if (freerdp_settings_get_bool(context()->settings, FreeRDP_UseMultimon))
+		{
+			/* Only this window's monitor: the window may be larger than the monitor the
+			 * server laid out, and the rest of the surface belongs to the other windows. */
+			const auto monitor = window.monitor(false);
 			offset = { window.offsetX(), window.offsetY() };
-		if (!window.drawRects(surface, offset, rects))
+			area = { -offset.x, -offset.y, std::min(size.w, monitor.width),
+				     std::min(size.h, monitor.height) };
+		}
+		const SDL_Rect surfaceRect = { 0, 0, surface->w, surface->h };
+		if (!SDL_GetRectIntersection(&area, &surfaceRect, &area))
+			return true;
+
+		std::vector<SDL_Rect> damage;
+		for (const auto& rect : (rects.empty() || window.stale()) ? std::vector{ area } : rects)
+		{
+			SDL_Rect clipped = {};
+			if (SDL_GetRectIntersection(&rect, &area, &clipped))
+				damage.push_back(clipped);
+		}
+		if (damage.empty())
+			return true;
+
+		/* Every upload allocates a staging texture (Metal), so merge many small rects. */
+		constexpr size_t maxRects = 8;
+		if (damage.size() > maxRects)
+		{
+			SDL_Rect bounds = damage.front();
+			for (const auto& rect : damage)
+				SDL_GetRectUnion(&bounds, &rect, &bounds);
+			damage = { bounds };
+		}
+
+		if (!window.drawRects(surface, offset, damage))
 			return false;
 	}
 
+	window.setStale(false);
 	window.updateSurface();
 	return true;
 }
@@ -1234,6 +1277,12 @@ bool SdlContext::handleEvent(const SDL_WindowEvent& ev)
 	{
 		case SDL_EVENT_WINDOW_MOUSE_ENTER:
 			return restoreCursor();
+		case SDL_EVENT_WINDOW_SHOWN:
+		case SDL_EVENT_WINDOW_EXPOSED:
+		case SDL_EVENT_WINDOW_RESTORED:
+			if (window->stale())
+				return drawToWindow(*window);
+			break;
 		case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
 			if (!resizeToScale(window))
 				return false;
@@ -1671,7 +1720,10 @@ bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects)
 		for (auto& window : _windows)
 		{
 			if ((SDL_GetWindowFlags(window.second.window()) & SDL_WINDOW_HIDDEN) == 0)
+			{
 				SDL_HideWindow(window.second.window());
+				_windowsHiddenForRail = true;
+			}
 		}
 
 		std::unique_lock lock(_critical);
@@ -1679,20 +1731,27 @@ bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects)
 		return true;
 	}
 
-	/* Non-RAIL mode (e.g. Non-Monitored Desktop during UAC / Consent UI): show the desktop window.
-	 */
+	/* Non-RAIL mode (e.g. Non-Monitored Desktop during UAC / Consent UI): show the desktop window
+	 * hidden above. A window hidden by the system (another space or app) must not be raised back;
+	 * drawToWindow skips it instead. */
 	bool firstShow = false;
-	for (auto& window : _windows)
+	if (_windowsHiddenForRail)
 	{
-		if (SDL_GetWindowFlags(window.second.window()) & SDL_WINDOW_HIDDEN)
+		for (auto& window : _windows)
 		{
-			SDL_ShowWindow(window.second.window());
-			SDL_RaiseWindow(window.second.window());
-			firstShow = true;
+			if (SDL_GetWindowFlags(window.second.window()) & SDL_WINDOW_HIDDEN)
+			{
+				SDL_ShowWindow(window.second.window());
+				SDL_RaiseWindow(window.second.window());
+			}
 		}
+		_windowsHiddenForRail = false;
+		firstShow = true;
 	}
 
-	if (rects.empty() && !firstShow)
+	const bool stale = std::any_of(_windows.begin(), _windows.end(),
+	                               [](const auto& window) { return window.second.stale(); });
+	if (rects.empty() && !firstShow && !stale)
 		return true;
 
 	std::vector<SDL_Rect> drawRects = rects;
