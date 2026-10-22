@@ -296,7 +296,7 @@ if(FREERDP_PC_LIBRARY_PRIVATE)
 endif()
 if(WITH_APPLE_VIDEOTOOLBOX)
   string(APPEND FREERDP_PC_LIBRARY_PRIVATE
-         " -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation"
+         " -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation -framework Accelerate"
   )
 endif()
 
