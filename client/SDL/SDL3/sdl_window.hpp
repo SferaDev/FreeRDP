@@ -113,7 +113,9 @@ class SdlWindow
 		Uint64 lastNS = 0;
 		Uint64 deferredAtNS = 0;
 		Uint64 damageSinceNS = 0; /* latency trace clock */
+		Uint64 repeatAtNS = 0;
 		bool pending = false;
+		bool repeating = false;
 	};
 	[[nodiscard]] PresentPacing& pacing();
 	[[nodiscard]] Uint64 refreshIntervalNS() const;

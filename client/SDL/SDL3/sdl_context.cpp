@@ -40,6 +40,7 @@
 #include <freerdp/utils/latency_trace.h>
 
 static constexpr auto sdl_allow_screensaver = "sdl-allow-screensaver";
+static constexpr Uint64 kRepresentDelayNS = 20 * SDL_NS_PER_MS;
 
 static void releaseFramebuffer(void* framebuffer)
 {
@@ -1130,6 +1131,11 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 				freerdp_latency_trace_record(FREERDP_LATENCY_UI_PACED, now - pacing.deferredAtNS);
 			pacing.damageSinceNS = 0;
 			pacing.lastNS = now;
+			/* macOS can drop a lone present after the screen was idle (its drawable never
+			 * reaches the display) and keep showing the previous image, so present each
+			 * frame once more shortly after; a newer frame replaces the repeat. */
+			pacing.repeatAtNS = pacing.repeating ? 0 : now + kRepresentDelayNS;
+			pacing.repeating = false;
 			window.setStale(false);
 			return true;
 		}
@@ -2213,13 +2219,20 @@ void SdlContext::clearUpdatePending()
 
 bool SdlContext::flushPacedPresents()
 {
-	if (!_pacePresents)
-		return true;
 	const auto now = SDL_GetTicksNS();
 	for (auto& window : _windows)
 	{
 		auto& pacing = window.second.pacing();
-		if (!pacing.pending)
+		if ((pacing.repeatAtNS != 0) && (now >= pacing.repeatAtNS) && !pacing.pending)
+		{
+			pacing.repeatAtNS = 0;
+			pacing.repeating = true;
+			if (!drawToWindow(window.second))
+				return false;
+			pacing.repeating = false;
+			continue;
+		}
+		if (!_pacePresents || !pacing.pending)
 			continue;
 		const auto due = pacing.lastNS + (window.second.refreshIntervalNS() * 3 / 4);
 		if (now < due)
@@ -2237,9 +2250,11 @@ Sint64 SdlContext::nextPacedPresentNS() const
 	for (auto& window : _windows)
 	{
 		auto& w = const_cast<SdlWindow&>(window.second);
-		if (!w.pacing().pending)
+		if (!w.pacing().pending && (w.pacing().repeatAtNS == 0))
 			continue;
-		const auto due = w.pacing().lastNS + (w.refreshIntervalNS() * 3 / 4);
+		const auto due = w.pacing().pending
+		                     ? w.pacing().lastNS + (w.refreshIntervalNS() * 3 / 4)
+		                     : w.pacing().repeatAtNS;
 		const Sint64 left = (due > now) ? static_cast<Sint64>(due - now) : 0;
 		if ((wait < 0) || (left < wait))
 			wait = left;
