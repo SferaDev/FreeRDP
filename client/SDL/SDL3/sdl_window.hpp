@@ -63,6 +63,8 @@ class SdlWindow
 	[[nodiscard]] Sint32 offsetY() const;
 
 	[[nodiscard]] rdpMonitor monitor(bool isPrimary) const;
+	/* The monitor this window covers, measured from the window itself. */
+	[[nodiscard]] rdpMonitor measure(bool forceAsPrimary) const;
 	void setMonitor(rdpMonitor monitor);
 
 	/* Set when drawing was skipped, so the next draw repaints the whole window. */
