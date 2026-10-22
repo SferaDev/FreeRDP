@@ -82,7 +82,7 @@ SdlWindow::SdlWindow(SdlWindow&& other) noexcept
       _gdiTexture(other._gdiTexture), _gdiTextureW(other._gdiTextureW),
       _gdiTextureH(other._gdiTextureH), _initialW(other._initialW), _initialH(other._initialH),
       _displayID(other._displayID), _offset_x(other._offset_x), _offset_y(other._offset_y),
-      _monitor(other._monitor)
+      _monitor(other._monitor), _stale(other._stale)
 {
 	other._window = nullptr;
 	other._renderer = nullptr;
@@ -178,6 +178,16 @@ rdpMonitor SdlWindow::monitor(bool isPrimary) const
 void SdlWindow::setMonitor(rdpMonitor monitor)
 {
 	_monitor = monitor;
+}
+
+bool SdlWindow::stale() const
+{
+	return _stale;
+}
+
+void SdlWindow::setStale(bool stale)
+{
+	_stale = stale;
 }
 
 float SdlWindow::scale() const
@@ -447,7 +457,14 @@ rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPr
 		return {};
 
 	const auto& r = rect(window, forceAsPrimary);
-	const float factor = SDL_GetWindowDisplayScale(window);
+	float factor = SDL_GetWindowDisplayScale(window);
+#if defined(__APPLE__)
+	/* The window scale follows the display the window is on, which can lag behind while it
+	 * moves into its full screen space; the display mode knows the backing scale. */
+	const auto mode = SDL_GetDesktopDisplayMode(id);
+	if (mode)
+		factor = std::max(factor, mode->pixel_density * SDL_GetDisplayContentScale(id));
+#endif
 	const float dpi = std::clamp(std::roundf(factor * 100.0f), 100.0f, 500.0f);
 
 	WINPR_ASSERT(r.w > 0);
@@ -840,9 +857,20 @@ static SDL_Window* createDummy(SDL_DisplayID id)
 	return window;
 }
 
+static void destroyDummy(SDL_Window* window)
+{
+#if defined(__APPLE__)
+	/* Leave the full screen space before destroying the window, otherwise its exit animation
+	 * still runs while the next window enters its space and that one can fail to. */
+	if (window && SDL_SetWindowFullscreen(window, false))
+		std::ignore = SDL_SyncWindow(window);
+#endif
+	SDL_DestroyWindow(window);
+}
+
 rdpMonitor SdlWindow::query(SDL_DisplayID id, bool forceAsPrimary)
 {
-	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), SDL_DestroyWindow);
+	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), destroyDummy);
 	if (!window)
 		return {};
 
@@ -861,7 +889,7 @@ rdpMonitor SdlWindow::query(SDL_DisplayID id, bool forceAsPrimary)
 
 SDL_Rect SdlWindow::rect(SDL_DisplayID id, bool forceAsPrimary)
 {
-	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), SDL_DestroyWindow);
+	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), destroyDummy);
 	if (!window)
 		return {};
 

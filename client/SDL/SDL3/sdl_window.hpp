@@ -62,6 +62,10 @@ class SdlWindow
 	[[nodiscard]] rdpMonitor monitor(bool isPrimary) const;
 	void setMonitor(rdpMonitor monitor);
 
+	/* Set when drawing was skipped, so the next draw repaints the whole window. */
+	[[nodiscard]] bool stale() const;
+	void setStale(bool stale);
+
 	[[nodiscard]] float scale() const;
 	[[nodiscard]] SDL_DisplayOrientation orientation() const;
 
@@ -133,4 +137,5 @@ class SdlWindow
 	Sint32 _offset_x = 0;
 	Sint32 _offset_y = 0;
 	rdpMonitor _monitor{};
+	bool _stale = false;
 };

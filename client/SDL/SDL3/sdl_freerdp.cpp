@@ -234,13 +234,14 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 					break;
 					case SDL_EVENT_USER_UPDATE:
 					{
+						/* Draw everything queued so far once: drawing batch by batch until the
+						 * queue is empty never returns to the event loop when frames arrive
+						 * faster than they are drawn. */
 						std::vector<SDL_Rect> rectangles;
-						do
-						{
-							rectangles = sdl->pop();
-							if (!sdl->drawToWindows(rectangles))
-								throw ErrorMsg{ -1, windowEvent.type, "sdl->drawToWindows" };
-						} while (!rectangles.empty());
+						for (auto next = sdl->pop(); !next.empty(); next = sdl->pop())
+							rectangles.insert(rectangles.end(), next.begin(), next.end());
+						if (!sdl->drawToWindows(rectangles))
+							throw ErrorMsg{ -1, windowEvent.type, "sdl->drawToWindows" };
 					}
 					break;
 					case SDL_EVENT_USER_CREATE_WINDOWS:
