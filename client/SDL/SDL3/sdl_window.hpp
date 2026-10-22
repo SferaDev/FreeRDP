@@ -128,6 +128,8 @@ class SdlWindow
 	                               Uint8 b = 0x00, Uint8 a = 0xff);
 	[[nodiscard]] static rdpMonitor query(SDL_Window* window, SDL_DisplayID id,
 	                                      bool forceAsPrimary = false);
+	[[nodiscard]] static rdpMonitor monitorFor(SDL_DisplayID id, const SDL_Rect& r, float factor,
+	                                           bool forceAsPrimary);
 	[[nodiscard]] static SDL_Rect rect(SDL_Window* window, bool forceAsPrimary = false);
 	[[nodiscard]] static SDL_Rect rect(SDL_DisplayID id, bool forceAsPrimary = false);
 

@@ -29,6 +29,8 @@
 
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
+
+#include "sdl_display_macos.hpp"
 #endif
 
 SdlWindow::SdlWindow(SDL_DisplayID id, const std::string& title, const SDL_Rect& rect,
@@ -473,6 +475,12 @@ rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPr
 	if (mode)
 		factor = std::max(factor, mode->pixel_density * SDL_GetDisplayContentScale(id));
 #endif
+	return monitorFor(id, r, factor, forceAsPrimary);
+}
+
+rdpMonitor SdlWindow::monitorFor(SDL_DisplayID id, const SDL_Rect& r, float factor,
+                                 bool forceAsPrimary)
+{
 	const float dpi = std::clamp(std::roundf(factor * 100.0f), 100.0f, 500.0f);
 
 	WINPR_ASSERT(r.w > 0);
@@ -950,6 +958,26 @@ static void destroyDummy(SDL_Window* window)
 
 rdpMonitor SdlWindow::query(SDL_DisplayID id, bool forceAsPrimary)
 {
+#if defined(__APPLE__)
+	/* A probe window would play the full screen space transition in and out on the display.
+	 * Full screen spaces cover the display below the camera housing, at its backing scale. */
+	SDL_Rect bounds = {};
+	if (!SDL_GetDisplayBounds(id, &bounds))
+		return {};
+	const auto mode = SDL_GetDesktopDisplayMode(id);
+	const float density = mode ? mode->pixel_density : 1.0f;
+	const float inset = sdl_display_top_inset(bounds);
+	SDL_Rect r = { bounds.x, bounds.y + static_cast<int>(std::lround(inset)),
+		           static_cast<int>(std::lround(static_cast<float>(bounds.w) * density)),
+		           static_cast<int>(
+		               std::lround((static_cast<float>(bounds.h) - inset) * density)) };
+	if (forceAsPrimary)
+	{
+		r.x = 0;
+		r.y = 0;
+	}
+	return monitorFor(id, r, density * SDL_GetDisplayContentScale(id), forceAsPrimary);
+#else
 	std::unique_ptr<SDL_Window, void (*)(SDL_Window*)> window(createDummy(id), destroyDummy);
 	if (!window)
 		return {};
@@ -965,6 +993,7 @@ rdpMonitor SdlWindow::query(SDL_DisplayID id, bool forceAsPrimary)
 		;
 
 	return query(window.get(), id, forceAsPrimary);
+#endif
 }
 
 SDL_Rect SdlWindow::rect(SDL_DisplayID id, bool forceAsPrimary)
