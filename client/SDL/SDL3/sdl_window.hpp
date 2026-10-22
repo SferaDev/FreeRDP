@@ -39,6 +39,9 @@ class SdlWindow
 	                                           bool transparent, bool tooltip = false);
 	[[nodiscard]] static rdpMonitor query(SDL_DisplayID id, bool forceAsPrimary = false);
 
+	/* Surface property holding the CVPixelBufferRef that backs its pixels, if any. */
+	[[nodiscard]] static const char* framebufferProperty();
+
 	SdlWindow(SdlWindow&& other) noexcept;
 	SdlWindow(const SdlWindow& other) = delete;
 	virtual ~SdlWindow();
@@ -131,6 +134,8 @@ class SdlWindow
 	SDL_Texture* _gdiTexture = nullptr;
 	int _gdiTextureW = 0;
 	int _gdiTextureH = 0;
+	void* _gdiTextureSource = nullptr;
+	bool _gdiTextureShared = false;
 	int _initialW = 0;
 	int _initialH = 0;
 	SDL_DisplayID _displayID = 0;

@@ -191,6 +191,7 @@ class SdlContext
 	void deleteDisplay(SDL_DisplayID id);
 
 	[[nodiscard]] bool createPrimary();
+	[[nodiscard]] bool createFramebuffer(UINT32 width, UINT32 height, BYTE** data, UINT32* stride);
 	[[nodiscard]] std::string windowTitle() const;
 	[[nodiscard]] bool waitForWindowsCreated();
 
@@ -231,6 +232,7 @@ class SdlContext
 	using SDLSurfacePtr = std::unique_ptr<SDL_Surface, decltype(&SDL_DestroySurface)>;
 
 	SDLSurfacePtr _primary;
+	std::unique_ptr<void, void (*)(void*)> _framebuffer;
 	SDL_FPoint _localScale{ 1.0f, 1.0f };
 
 	sdlDispContext _disp;

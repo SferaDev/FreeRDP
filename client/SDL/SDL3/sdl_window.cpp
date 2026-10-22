@@ -80,9 +80,10 @@ SdlWindow::SdlWindow(SDL_DisplayID id, const std::string& title, const SDL_Rect&
 SdlWindow::SdlWindow(SdlWindow&& other) noexcept
     : _window(other._window), _renderer(other._renderer), _renderTarget(other._renderTarget),
       _gdiTexture(other._gdiTexture), _gdiTextureW(other._gdiTextureW),
-      _gdiTextureH(other._gdiTextureH), _initialW(other._initialW), _initialH(other._initialH),
-      _displayID(other._displayID), _offset_x(other._offset_x), _offset_y(other._offset_y),
-      _monitor(other._monitor), _stale(other._stale)
+      _gdiTextureH(other._gdiTextureH), _gdiTextureSource(other._gdiTextureSource),
+      _gdiTextureShared(other._gdiTextureShared), _initialW(other._initialW),
+      _initialH(other._initialH), _displayID(other._displayID), _offset_x(other._offset_x),
+      _offset_y(other._offset_y), _monitor(other._monitor), _stale(other._stale)
 {
 	other._window = nullptr;
 	other._renderer = nullptr;
@@ -595,14 +596,41 @@ SdlWindow::HighDPIMode SdlWindow::isHighDPIWindowsMode(SDL_Window* window)
 }
 
 /* Lazily create or recreate the persistent streaming GDI texture to match `surface`. */
+const char* SdlWindow::framebufferProperty()
+{
+	return "FreeRDP.SDL.framebuffer.pixelbuffer";
+}
+
 bool SdlWindow::ensureGdiTexture(SDL_Surface* surface)
 {
-	if (_gdiTexture && (_gdiTextureW == surface->w) && (_gdiTextureH == surface->h))
+	auto source =
+	    SDL_GetPointerProperty(SDL_GetSurfaceProperties(surface), framebufferProperty(), nullptr);
+	if (_gdiTexture && (_gdiTextureW == surface->w) && (_gdiTextureH == surface->h) &&
+	    (_gdiTextureSource == source))
 		return true;
 	if (_gdiTexture)
 		SDL_DestroyTexture(_gdiTexture);
-	_gdiTexture = SDL_CreateTexture(_renderer, surface->format, SDL_TEXTUREACCESS_STREAMING,
-	                                surface->w, surface->h);
+	_gdiTexture = nullptr;
+	_gdiTextureShared = false;
+
+	const char* name = SDL_GetRendererName(_renderer);
+	if (source && name && (strcmp(name, "metal") == 0))
+	{
+		/* Shares the surface's memory, so drawing needs no upload. */
+		auto props = SDL_CreateProperties();
+		SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, surface->format);
+		SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER,
+		                      SDL_TEXTUREACCESS_STATIC);
+		SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, surface->w);
+		SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, surface->h);
+		SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_METAL_PIXELBUFFER_POINTER, source);
+		_gdiTexture = SDL_CreateTextureWithProperties(_renderer, props);
+		SDL_DestroyProperties(props);
+		_gdiTextureShared = (_gdiTexture != nullptr);
+	}
+	if (!_gdiTexture)
+		_gdiTexture = SDL_CreateTexture(_renderer, surface->format, SDL_TEXTUREACCESS_STREAMING,
+		                                surface->w, surface->h);
 	if (!_gdiTexture)
 	{
 		SDL_LogError(SDL_LOG_CATEGORY_RENDER, "SDL_CreateTexture: %s", SDL_GetError());
@@ -611,6 +639,7 @@ bool SdlWindow::ensureGdiTexture(SDL_Surface* surface)
 	std::ignore = SDL_SetTextureBlendMode(_gdiTexture, SDL_BLENDMODE_NONE);
 	_gdiTextureW = surface->w;
 	_gdiTextureH = surface->h;
+	_gdiTextureSource = source;
 	return true;
 }
 
@@ -629,7 +658,7 @@ bool SdlWindow::blit(SDL_Surface* surface, const SDL_Rect& srcRect, SDL_Rect& ds
 	const int bpp = details ? details->bytes_per_pixel : 4;
 	const auto* pixels = static_cast<const uint8_t*>(surface->pixels) +
 	                     (1ll * srcRect.y * surface->pitch) + (1ll * srcRect.x * bpp);
-	if (!SDL_UpdateTexture(_gdiTexture, &srcRect, pixels, surface->pitch))
+	if (!_gdiTextureShared && !SDL_UpdateTexture(_gdiTexture, &srcRect, pixels, surface->pitch))
 	{
 		SDL_LogError(SDL_LOG_CATEGORY_RENDER, "SDL_UpdateTexture: %s", SDL_GetError());
 		return false;
@@ -680,7 +709,7 @@ bool SdlWindow::paintResizeFrame(SDL_Surface* surface, SDL_Point off, bool conte
 		return false;
 	/* A recreated texture is empty, so upload even when the content did not change. */
 	const bool recreated = (_gdiTextureW != prevW) || (_gdiTextureH != prevH);
-	if ((contentChanged || recreated) &&
+	if ((contentChanged || recreated) && !_gdiTextureShared &&
 	    !SDL_UpdateTexture(_gdiTexture, nullptr, surface->pixels, surface->pitch))
 		return false;
 
