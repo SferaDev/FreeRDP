@@ -58,6 +58,32 @@ extern "C"
 		AINPUT_XFLAGS_BUTTON2 = 0x0200
 	} AInputEventFlags;
 
+/* Scroll gesture extension, above the 32 bits of AInputEventFlags. With AINPUT_FLAGS_WHEEL, a
+ * server that knows it can replay a trackpad gesture with its phases; others ignore the bits. */
+#define AINPUT_FLAGS_SCROLL_EXT UINT64_C(0x100000000)
+/* Continuous deltas from a trackpad or high-resolution wheel rather than wheel notches. */
+#define AINPUT_FLAGS_SCROLL_PRECISE UINT64_C(0x200000000)
+#define AINPUT_FLAGS_SCROLL_PHASE_SHIFT 36
+#define AINPUT_FLAGS_SCROLL_MOMENTUM_SHIFT 40
+
+	typedef enum
+	{
+		AINPUT_SCROLL_PHASE_NONE = 0,
+		AINPUT_SCROLL_PHASE_BEGAN = 1,
+		AINPUT_SCROLL_PHASE_CHANGED = 2,
+		AINPUT_SCROLL_PHASE_ENDED = 3,
+		AINPUT_SCROLL_PHASE_CANCELLED = 4,
+		AINPUT_SCROLL_PHASE_MAY_BEGIN = 5
+	} AInputScrollPhase;
+
+	typedef enum
+	{
+		AINPUT_SCROLL_MOMENTUM_NONE = 0,
+		AINPUT_SCROLL_MOMENTUM_BEGAN = 1,
+		AINPUT_SCROLL_MOMENTUM_CHANGED = 2,
+		AINPUT_SCROLL_MOMENTUM_ENDED = 3
+	} AInputScrollMomentum;
+
 	typedef struct ainput_client_context AInputClientContext;
 
 #define AINPUT_VERSION_MAJOR 1

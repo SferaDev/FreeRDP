@@ -119,6 +119,8 @@ class SdlContext
 
 	[[nodiscard]] const SdlWindow* getWindowForId(SDL_WindowID id) const;
 	[[nodiscard]] SdlWindow* getWindowForId(SDL_WindowID id);
+	/* A window showing the session, including a RemoteApp window. */
+	[[nodiscard]] bool isSessionWindow(SDL_WindowID id);
 	[[nodiscard]] SdlWindow* getFirstWindow();
 
 	[[nodiscard]] bool addDisplayWindow(SDL_DisplayID id);

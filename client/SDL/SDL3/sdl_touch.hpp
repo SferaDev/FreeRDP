@@ -33,6 +33,10 @@ class SdlTouch
 
 	[[nodiscard]] static bool handleEvent(SdlContext* sdl, const SDL_TouchFingerEvent& ev);
 
+	/* x and y in wheel units, 120 per notch, positive scrolls right and up; ext holds
+	 * AINPUT_FLAGS_SCROLL_* bits. */
+	[[nodiscard]] static bool sendScroll(SdlContext* sdl, double x, double y, UINT64 ext);
+
   private:
 	[[nodiscard]] static bool touchDown(SdlContext* sdl, const SDL_TouchFingerEvent& ev);
 	[[nodiscard]] static bool touchUp(SdlContext* sdl, const SDL_TouchFingerEvent& ev);

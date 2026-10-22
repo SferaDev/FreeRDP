@@ -57,7 +57,13 @@ set(SRCS
     sdl_wayland.cpp
     sdl_x11.hpp
     sdl_x11.cpp
+    sdl_scroll_macos.hpp
 )
+
+if(APPLE)
+  list(APPEND SRCS sdl_scroll_macos.mm)
+  set_source_files_properties(sdl_scroll_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif()
 
 # Native X11 helpers for RAIL (_NET_WM_MOVERESIZE, compositor detection); no-op stubs without libX11.
 set(SDL_X11_NATIVE OFF)
@@ -157,7 +163,8 @@ if(APPLE)
   find_library(COREGRAPHICS_LIBRARY CoreGraphics REQUIRED)
   find_library(COREVIDEO_LIBRARY CoreVideo REQUIRED)
   find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)
-  list(APPEND LIBS ${COREGRAPHICS_LIBRARY} ${COREVIDEO_LIBRARY} ${COREFOUNDATION_LIBRARY})
+  find_library(APPKIT_LIBRARY AppKit REQUIRED)
+  list(APPEND LIBS ${COREGRAPHICS_LIBRARY} ${COREVIDEO_LIBRARY} ${COREFOUNDATION_LIBRARY} ${APPKIT_LIBRARY})
 endif()
 
 target_link_libraries(${MODULE_NAME} PRIVATE ${LIBS})

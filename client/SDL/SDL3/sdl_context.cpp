@@ -1261,6 +1261,15 @@ bool SdlContext::handleEvent(const SDL_MouseMotionEvent& ev)
 	return SdlTouch::handleEvent(this, copy.motion);
 }
 
+bool SdlContext::isSessionWindow(SDL_WindowID id)
+{
+	float x = 0.0f;
+	float y = 0.0f;
+	if (_rail.enabled() && _rail.translateToServer(id, x, y))
+		return true;
+	return getWindowForId(id) != nullptr;
+}
+
 bool SdlContext::handleEvent(const SDL_MouseWheelEvent& ev)
 {
 	SDL_Event copy{};
