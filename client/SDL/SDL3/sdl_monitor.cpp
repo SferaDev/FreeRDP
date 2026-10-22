@@ -209,9 +209,16 @@ int sdl_list_monitors([[maybe_unused]] SdlContext* sdl)
 		}
 		return TRUE;
 	}
+	const auto mask = freerdp_settings_get_uint64(settings, FreeRDP_MonitorOverrideFlags);
 	for (const auto& id : sdl->monitorIds())
 	{
-		const auto monitor = sdl->getDisplay(id);
+		auto monitor = sdl->getDisplay(id);
+		if ((mask & FREERDP_MONITOR_OVERRIDE_DESKTOP_SCALE) != 0)
+			monitor.attributes.desktopScaleFactor =
+			    freerdp_settings_get_uint32(settings, FreeRDP_DesktopScaleFactor);
+		if ((mask & FREERDP_MONITOR_OVERRIDE_DEVICE_SCALE) != 0)
+			monitor.attributes.deviceScaleFactor =
+			    freerdp_settings_get_uint32(settings, FreeRDP_DeviceScaleFactor);
 		monitors.emplace_back(monitor);
 	}
 	// /monitors: may select a subset that excludes the SDL primary. The
@@ -220,8 +227,28 @@ int sdl_list_monitors([[maybe_unused]] SdlContext* sdl)
 	if (!monitors.empty() && std::none_of(monitors.cbegin(), monitors.cend(),
 	                                      [](const rdpMonitor& m) { return m.is_primary; }))
 		monitors.at(0).is_primary = true;
-	return freerdp_settings_set_monitor_def_array_sorted(settings, monitors.data(),
-	                                                     monitors.size());
+	if (!freerdp_settings_set_monitor_def_array_sorted(settings, monitors.data(), monitors.size()))
+		return FALSE;
+
+	/* Without TS_UD_CS_MONITOR_EX the server never learns the per monitor scale. It is only
+	 * sent along with TS_UD_CS_MONITOR, which needs more than one monitor. */
+	if (!freerdp_settings_set_bool(settings, FreeRDP_HasMonitorAttributes, monitors.size() > 1))
+		return FALSE;
+
+	for (UINT32 x = 0; x < freerdp_settings_get_uint32(settings, FreeRDP_MonitorCount); x++)
+	{
+		auto monitor = static_cast<const rdpMonitor*>(
+		    freerdp_settings_get_pointer_array(settings, FreeRDP_MonitorDefArray, x));
+		WLog_Print(sdl->getWLog(), WLOG_DEBUG,
+		           "monitor[%" PRIu32 "] display=%" PRIu32 " %" PRId32 "x%" PRId32 "%+" PRId32
+		           "%+" PRId32 " primary=%" PRIu32 " scale=%" PRIu32 "/%" PRIu32
+		           " physical=%" PRIu32 "x%" PRIu32 "mm orientation=%" PRIu32,
+		           x, monitor->orig_screen, monitor->width, monitor->height, monitor->x, monitor->y,
+		           monitor->is_primary, monitor->attributes.desktopScaleFactor,
+		           monitor->attributes.deviceScaleFactor, monitor->attributes.physicalWidth,
+		           monitor->attributes.physicalHeight, monitor->attributes.orientation);
+	}
+	return TRUE;
 }
 
 [[nodiscard]] static BOOL sdl_detect_single_window(SdlContext* sdl, UINT32* pMaxWidth,

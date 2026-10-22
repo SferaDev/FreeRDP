@@ -153,6 +153,11 @@ if(SDL_X11_NATIVE)
   list(APPEND LIBS ${X11_LIBRARIES})
 endif()
 
+if(APPLE)
+  find_library(COREGRAPHICS_LIBRARY CoreGraphics REQUIRED)
+  list(APPEND LIBS ${COREGRAPHICS_LIBRARY})
+endif()
+
 target_link_libraries(${MODULE_NAME} PRIVATE ${LIBS})
 
 set_property(TARGET ${MODULE_NAME} PROPERTY FOLDER "Client/SDL")

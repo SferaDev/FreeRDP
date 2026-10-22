@@ -390,6 +390,12 @@ bool SdlContext::createWindows()
 		auto monitor = static_cast<rdpMonitor*>(
 		    freerdp_settings_get_pointer_array_writable(settings, FreeRDP_MonitorDefArray, x));
 
+		/* The monitor array is sorted primary first, then by position, so its index does not
+		 * match the order of the display IDs. */
+		const auto& ids = monitorIds();
+		if (std::find(ids.begin(), ids.end(), monitor->orig_screen) != ids.end())
+			id = monitor->orig_screen;
+
 		Uint32 w = WINPR_ASSERTING_INT_CAST(Uint32, monitor->width);
 		Uint32 h = WINPR_ASSERTING_INT_CAST(Uint32, monitor->height);
 		if (!(freerdp_settings_get_bool(settings, FreeRDP_UseMultimon) ||
@@ -408,9 +414,11 @@ bool SdlContext::createWindows()
 
 		Uint32 flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
 
-		if (freerdp_settings_get_bool(settings, FreeRDP_Fullscreen) &&
-		    !freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
+		if (freerdp_settings_get_bool(settings, FreeRDP_Fullscreen) ||
+		    freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
 		{
+			/* Created on the display bounds, so the window already sits on its own display
+			 * (and on macOS in its own space) instead of a pixel sized window centered on it. */
 			flags |= SDL_WINDOW_FULLSCREEN;
 		}
 
@@ -429,7 +437,19 @@ bool SdlContext::createWindows()
 		{
 			window.setOffsetX(originX - monitor->x);
 			window.setOffsetY(originY - monitor->y);
+			window.setMonitor(*monitor);
 		}
+
+		const auto b = window.bounds();
+		const auto r = window.rect();
+		WLog_Print(getWLog(), WLOG_DEBUG,
+		           "window[%" PRIu32 "] display=%" PRIu32 " monitor=%" PRId32 "x%" PRId32
+		           "%+" PRId32 "%+" PRId32 " primary=%" PRIu32 " scale=%" PRIu32 "/%" PRIu32
+		           " placed=%dx%d%+d%+d (pixels %dx%d) offset=%+" PRId32 "%+" PRId32,
+		           x, did, monitor->width, monitor->height, monitor->x, monitor->y,
+		           monitor->is_primary, monitor->attributes.desktopScaleFactor,
+		           monitor->attributes.deviceScaleFactor, b.w, b.h, b.x, b.y, r.w, r.h,
+		           window.offsetX(), window.offsetY());
 
 		_windows.insert({ window.id(), std::move(window) });
 	}

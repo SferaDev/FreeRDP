@@ -17,6 +17,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <algorithm>
 #include <limits>
 #include <sstream>
 #include <cmath>
@@ -25,6 +26,10 @@
 #include "sdl_utils.hpp"
 
 #include <freerdp/utils/string.h>
+
+#if defined(__APPLE__)
+#include <CoreGraphics/CoreGraphics.h>
+#endif
 
 SdlWindow::SdlWindow(SDL_DisplayID id, const std::string& title, const SDL_Rect& rect,
                      [[maybe_unused]] Uint32 flags)
@@ -394,6 +399,48 @@ bool SdlWindow::fill(SDL_Window* window, Uint8 r, Uint8 g, Uint8 b, Uint8 a)
 	return SDL_FillSurfaceRect(surface, &rect, color);
 }
 
+/* MS-RDPBCGR 2.2.1.3.9.1: deviceScaleFactor is one of 100, 140 or 180 */
+static UINT32 deviceScaleFactor(UINT32 desktopScaleFactor)
+{
+	if (desktopScaleFactor >= 180)
+		return 180;
+	if (desktopScaleFactor >= 140)
+		return 140;
+	return 100;
+}
+
+static bool physicalSize(SDL_DisplayID id, UINT32& width, UINT32& height)
+{
+#if defined(__APPLE__)
+	SDL_Rect bounds = {};
+	if (!SDL_GetDisplayBounds(id, &bounds))
+		return false;
+
+	/* SDL does not expose the CGDirectDisplayID, but its display bounds are CGDisplayBounds. */
+	CGDirectDisplayID displays[32] = {};
+	uint32_t count = 0;
+	if (CGGetActiveDisplayList(ARRAYSIZE(displays), displays, &count) != kCGErrorSuccess)
+		return false;
+	for (uint32_t x = 0; x < count; x++)
+	{
+		const auto rect = CGDisplayBounds(displays[x]);
+		if ((std::lround(rect.origin.x) != bounds.x) || (std::lround(rect.origin.y) != bounds.y))
+			continue;
+		const auto size = CGDisplayScreenSize(displays[x]);
+		if ((size.width < 10.0) || (size.height < 10.0))
+			return false;
+		width = static_cast<UINT32>(std::lround(size.width));
+		height = static_cast<UINT32>(std::lround(size.height));
+		return true;
+	}
+#else
+	WINPR_UNUSED(id);
+	WINPR_UNUSED(width);
+	WINPR_UNUSED(height);
+#endif
+	return false;
+}
+
 rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPrimary)
 {
 	if (!window)
@@ -401,7 +448,7 @@ rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPr
 
 	const auto& r = rect(window, forceAsPrimary);
 	const float factor = SDL_GetWindowDisplayScale(window);
-	const float dpi = std::roundf(factor * 100.0f);
+	const float dpi = std::clamp(std::roundf(factor * 100.0f), 100.0f, 500.0f);
 
 	WINPR_ASSERT(r.w > 0);
 	WINPR_ASSERT(r.h > 0);
@@ -418,10 +465,13 @@ rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPr
 	monitor.height = r.h;
 	monitor.is_primary = forceAsPrimary || (id == primary);
 	monitor.attributes.desktopScaleFactor = static_cast<UINT32>(dpi);
-	monitor.attributes.deviceScaleFactor = 100;
+	monitor.attributes.deviceScaleFactor = deviceScaleFactor(monitor.attributes.desktopScaleFactor);
 	monitor.attributes.orientation = rdp_orientation;
-	monitor.attributes.physicalWidth = WINPR_ASSERTING_INT_CAST(uint32_t, r.w);
-	monitor.attributes.physicalHeight = WINPR_ASSERTING_INT_CAST(uint32_t, r.h);
+	if (!physicalSize(id, monitor.attributes.physicalWidth, monitor.attributes.physicalHeight))
+	{
+		monitor.attributes.physicalWidth = WINPR_ASSERTING_INT_CAST(uint32_t, r.w);
+		monitor.attributes.physicalHeight = WINPR_ASSERTING_INT_CAST(uint32_t, r.h);
+	}
 
 	const auto cat = SDL_LOG_CATEGORY_APPLICATION;
 	SDL_LogDebug(cat, "monitor.orig_screen                   %" PRIu32, monitor.orig_screen);
