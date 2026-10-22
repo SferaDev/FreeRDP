@@ -44,6 +44,8 @@
 
 #include "rdpgfx_main.h"
 
+#include <freerdp/utils/latency_trace.h>
+
 #define GFXTAG CHANNELS_TAG("rdpgfx.client")
 
 #define RDPGFX_NUMBER_CAPSETS 0x100
@@ -1321,6 +1323,7 @@ static UINT rdpgfx_recv_start_frame_pdu(GENERIC_CHANNEL_CALLBACK* callback, wStr
 	           "RecvStartFramePdu: frameId: %" PRIu32 " timestamp: 0x%08" PRIX32 "", pdu.frameId,
 	           pdu.timestamp);
 	gfx->StartDecodingTime = GetTickCount64();
+	gfx->traceFrameStartNS = freerdp_latency_trace_enabled() ? freerdp_latency_trace_now() : 0;
 
 	if (context)
 	{
@@ -1357,6 +1360,8 @@ static UINT rdpgfx_recv_end_frame_pdu(GENERIC_CHANNEL_CALLBACK* callback, wStrea
 	WLog_Print(gfx->base.log, WLOG_TRACE, "RecvEndFramePdu: frameId: %" PRIu32 "", pdu.frameId);
 
 	const UINT64 start = GetTickCount64();
+	freerdp_latency_trace_since(FREERDP_LATENCY_GFX_FRAME, gfx->traceFrameStartNS);
+	const UINT64 traceEndFrame = freerdp_latency_trace_enabled() ? freerdp_latency_trace_now() : 0;
 	if (context)
 	{
 		IFCALLRET(context->EndFrame, error, context, &pdu);
@@ -1370,6 +1375,7 @@ static UINT rdpgfx_recv_end_frame_pdu(GENERIC_CHANNEL_CALLBACK* callback, wStrea
 	}
 	const UINT64 end = GetTickCount64();
 	const UINT64 EndFrameTime = end - start;
+	freerdp_latency_trace_since(FREERDP_LATENCY_GFX_END_FRAME, traceEndFrame);
 	gfx->TotalDecodedFrames++;
 
 	if (!gfx->sendFrameAcks)
@@ -1395,6 +1401,7 @@ static UINT rdpgfx_recv_end_frame_pdu(GENERIC_CHANNEL_CALLBACK* callback, wStrea
 		if ((error = rdpgfx_send_frame_acknowledge_pdu(context, &ack)))
 			WLog_Print(gfx->base.log, WLOG_ERROR,
 			           "rdpgfx_send_frame_acknowledge_pdu failed with error %" PRIu32 "", error);
+		freerdp_latency_trace_since(FREERDP_LATENCY_GFX_ACK, gfx->traceFrameStartNS);
 	}
 
 	switch (gfx->ConnectionCaps.version)
@@ -1587,7 +1594,9 @@ UINT logSurfaceCommand(RDPGFX_PLUGIN* gfx, const RDPGFX_SURFACE_COMMAND* cmd)
 	if (!checkSurfaceCommand(gfx, cmd))
 		return CHANNEL_RC_NULL_DATA;
 
+	const UINT64 traceStart = freerdp_latency_trace_enabled() ? freerdp_latency_trace_now() : 0;
 	const UINT error = IFCALLRESULT(CHANNEL_RC_OK, context->SurfaceCommand, context, cmd);
+	freerdp_latency_trace_since(FREERDP_LATENCY_GFX_DECODE, traceStart);
 
 	if (error)
 		WLog_Print(gfx->base.log, WLOG_ERROR,

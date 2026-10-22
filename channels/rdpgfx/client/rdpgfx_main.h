@@ -42,6 +42,7 @@ typedef struct
 	UINT32 UnacknowledgedFrames;
 	UINT32 TotalDecodedFrames;
 	UINT64 StartDecodingTime;
+	UINT64 traceFrameStartNS;
 	BOOL suspendFrameAcks;
 	BOOL sendFrameAcks;
 
