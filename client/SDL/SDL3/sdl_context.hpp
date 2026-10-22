@@ -198,7 +198,11 @@ class SdlContext
 	[[nodiscard]] bool handleEvent(const SDL_TouchFingerEvent& ev);
 
 	void addOrUpdateDisplay(SDL_DisplayID id);
+	void addOrUpdateDisplay(SDL_DisplayID id, const rdpMonitor& monitor);
 	void deleteDisplay(SDL_DisplayID id);
+	[[nodiscard]] std::vector<SDL_DisplayID>
+	sessionDisplays(const std::vector<SDL_DisplayID>& ids) const;
+	[[nodiscard]] Uint32 windowFlags() const;
 
 	[[nodiscard]] bool createPrimary();
 	[[nodiscard]] bool createFramebuffer(UINT32 width, UINT32 height, BYTE** data, UINT32* stride);
@@ -258,6 +262,8 @@ class SdlContext
 
 	std::map<SDL_DisplayID, rdpMonitor> _displays;
 	std::map<SDL_WindowID, SdlWindow> _windows;
+	/* Full screen windows created while measuring the displays, until the session takes them. */
+	std::map<SDL_DisplayID, SdlWindow> _pendingWindows;
 	std::map<SDL_DisplayID, std::pair<SDL_Rect, SDL_Rect>> _offsets;
 
 	bool _windowsHiddenForRail = false;

@@ -138,6 +138,7 @@ void SdlContext::cleanup()
 {
 	std::unique_lock lock(_critical);
 	_windows.clear();
+	_pendingWindows.clear();
 	_dialog.destroy();
 	_primary.reset();
 	_framebuffer.reset();
@@ -504,26 +505,10 @@ bool SdlContext::createWindows()
 				h = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
 		}
 
-		Uint32 flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
-
-		if (freerdp_settings_get_bool(settings, FreeRDP_Fullscreen) ||
-		    freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
-		{
-			/* Created on the display bounds, so the window already sits on its own display
-			 * (and on macOS in its own space) instead of a pixel sized window centered on it. */
-			flags |= SDL_WINDOW_FULLSCREEN;
-		}
-
-		if (freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
-		{
-			flags |= SDL_WINDOW_BORDERLESS;
-		}
-
-		if (!freerdp_settings_get_bool(settings, FreeRDP_Decorations))
-			flags |= SDL_WINDOW_BORDERLESS;
-
 		auto did = WINPR_ASSERTING_INT_CAST(SDL_DisplayID, id);
-		auto window = SdlWindow::create(did, title, flags, w, h);
+		auto pending = _pendingWindows.extract(did);
+		auto window = pending.empty() ? SdlWindow::create(did, title, windowFlags(), w, h)
+		                              : std::move(pending.mapped());
 
 		if (freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
 		{
@@ -545,8 +530,32 @@ bool SdlContext::createWindows()
 
 		_windows.insert({ window.id(), std::move(window) });
 	}
+	_pendingWindows.clear();
 
 	return true;
+}
+
+Uint32 SdlContext::windowFlags() const
+{
+	auto settings = context()->settings;
+	Uint32 flags = SDL_WINDOW_HIGH_PIXEL_DENSITY;
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_Fullscreen) ||
+	    freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
+	{
+		/* Created on the display bounds, so the window already sits on its own display
+		 * (and on macOS in its own space) instead of a pixel sized window centered on it. */
+		flags |= SDL_WINDOW_FULLSCREEN;
+	}
+
+	if (freerdp_settings_get_bool(settings, FreeRDP_UseMultimon))
+	{
+		flags |= SDL_WINDOW_BORDERLESS;
+	}
+
+	if (!freerdp_settings_get_bool(settings, FreeRDP_Decorations))
+		flags |= SDL_WINDOW_BORDERLESS;
+	return flags;
 }
 
 bool SdlContext::updateWindowList()
@@ -1202,13 +1211,59 @@ bool SdlContext::detectDisplays()
 	auto display = SDL_GetDisplays(&count);
 	if (!display)
 		return false;
-	for (int x = 0; x < count; x++)
-	{
-		const auto id = display[x];
-		addOrUpdateDisplay(id);
-	}
+	const std::vector<SDL_DisplayID> ids(display, display + count);
 	SDL_free(display);
+
+	/* A display the session covers full screen is measured with its session window: a probe
+	 * window would go full screen and back first, which on macOS plays the space transition
+	 * twice per display before the session window plays it again. */
+	const auto session = sessionDisplays(ids);
+	for (const auto id : ids)
+	{
+		if (std::find(session.begin(), session.end(), id) == session.end())
+		{
+			addOrUpdateDisplay(id);
+			continue;
+		}
+		auto window = SdlWindow::create(id, windowTitle(), windowFlags());
+		addOrUpdateDisplay(id, window.measure(false));
+		_pendingWindows.emplace(id, std::move(window));
+	}
 	return true;
+}
+
+std::vector<SDL_DisplayID> SdlContext::sessionDisplays(const std::vector<SDL_DisplayID>& ids) const
+{
+#if defined(__APPLE__)
+	auto settings = context()->settings;
+	if (ids.empty() || freerdp_settings_get_bool(settings, FreeRDP_AuthenticationOnly) ||
+	    freerdp_settings_get_bool(settings, FreeRDP_RemoteApplicationMode) ||
+	    freerdp_settings_get_bool(settings, FreeRDP_SpanMonitors))
+		return {};
+
+	const bool multimon = freerdp_settings_get_bool(settings, FreeRDP_UseMultimon);
+	if (!multimon && !freerdp_settings_get_bool(settings, FreeRDP_Fullscreen))
+		return {};
+
+	std::vector<SDL_DisplayID> selected;
+	const auto nr = freerdp_settings_get_uint32(settings, FreeRDP_NumMonitorIds);
+	for (UINT32 x = 0; x < nr; x++)
+	{
+		auto cur = static_cast<const UINT32*>(
+		    freerdp_settings_get_pointer_array(settings, FreeRDP_MonitorIds, x));
+		if (cur && (std::find(ids.begin(), ids.end(), *cur) != ids.end()))
+			selected.push_back(*cur);
+	}
+	if (nr > 0)
+		return selected;
+	if (multimon)
+		return ids;
+	/* sdl_detect_monitors picks the lowest display ID for a single monitor. */
+	return { *std::min_element(ids.begin(), ids.end()) };
+#else
+	WINPR_UNUSED(ids);
+	return {};
+#endif
 }
 
 rdpMonitor SdlContext::getDisplay(SDL_DisplayID id) const
@@ -1567,7 +1622,11 @@ bool SdlContext::handleEvent(const SDL_TouchFingerEvent& ev)
 
 void SdlContext::addOrUpdateDisplay(SDL_DisplayID id)
 {
-	auto monitor = SdlWindow::query(id, false);
+	addOrUpdateDisplay(id, SdlWindow::query(id, false));
+}
+
+void SdlContext::addOrUpdateDisplay(SDL_DisplayID id, const rdpMonitor& monitor)
+{
 	_displays.emplace(id, monitor);
 
 	/* Update actual display rectangles:

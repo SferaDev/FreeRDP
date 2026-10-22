@@ -454,6 +454,11 @@ static bool physicalSize(SDL_DisplayID id, UINT32& width, UINT32& height)
 	return false;
 }
 
+rdpMonitor SdlWindow::measure(bool forceAsPrimary) const
+{
+	return query(_window, _displayID, forceAsPrimary);
+}
+
 rdpMonitor SdlWindow::query(SDL_Window* window, SDL_DisplayID id, bool forceAsPrimary)
 {
 	if (!window)
