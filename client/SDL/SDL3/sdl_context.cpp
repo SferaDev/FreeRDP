@@ -1191,6 +1191,10 @@ bool SdlContext::addDisplayWindow(SDL_DisplayID id)
 	    SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_BORDERLESS;
 	auto title = sdl::utils::windowTitle(context()->settings);
 	auto w = SdlWindow::create(id, title, flags);
+#if defined(__APPLE__)
+	/* A window just taken full screen can still report its placeholder size. */
+	w.setMonitor(SdlWindow::query(id, true));
+#endif
 	_windows.emplace(w.id(), std::move(w));
 	return true;
 }
@@ -1214,19 +1218,19 @@ bool SdlContext::detectDisplays()
 	const std::vector<SDL_DisplayID> ids(display, display + count);
 	SDL_free(display);
 
-	/* A display the session covers full screen is measured with its session window: a probe
-	 * window would go full screen and back first, which on macOS plays the space transition
-	 * twice per display before the session window plays it again. */
-	const auto session = sessionDisplays(ids);
+	/* The layout comes from the displays alone: a new full screen window can report a
+	 * placeholder size while earlier full screen windows are still closing. Measure every
+	 * display before any session window exists, since a full screen space hides the menu bar
+	 * the macOS measurement reads. */
 	for (const auto id : ids)
+		addOrUpdateDisplay(id);
+
+	/* A display the session covers full screen gets its session window now, so it plays the
+	 * macOS space transition once instead of again after connecting. */
+	for (const auto id : sessionDisplays(ids))
 	{
-		if (std::find(session.begin(), session.end(), id) == session.end())
-		{
-			addOrUpdateDisplay(id);
-			continue;
-		}
 		auto window = SdlWindow::create(id, windowTitle(), windowFlags());
-		addOrUpdateDisplay(id, window.measure(false));
+		window.setMonitor(getDisplay(id));
 		_pendingWindows.emplace(id, std::move(window));
 	}
 	return true;

@@ -17,6 +17,7 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <cmath>
 
 #import <AppKit/AppKit.h>
@@ -38,7 +39,15 @@ float sdl_display_top_inset(const SDL_Rect& bounds)
 			    (std::lround(rect.origin.y) != bounds.y))
 				continue;
 			if (@available(macOS 12.0, *))
-				return static_cast<float>(screen.safeAreaInsets.top);
+			{
+				const CGFloat safe = screen.safeAreaInsets.top;
+				if (safe <= 0.0)
+					return 0.0f;
+				/* Full screen windows start below the menu bar, which is a point taller than the
+				 * housing: 949 of 982 points on a 14" MacBook Pro, not 950. */
+				const CGFloat menu = NSMaxY(screen.frame) - NSMaxY(screen.visibleFrame);
+				return static_cast<float>(std::max(safe, menu));
+			}
 			return 0.0f;
 		}
 	}

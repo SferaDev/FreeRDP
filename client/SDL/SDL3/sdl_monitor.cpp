@@ -33,6 +33,7 @@
 #include <winpr/crt.h>
 
 #include <freerdp/log.h>
+#include <freerdp/channels/disp.h>
 
 #define TAG CLIENT_TAG("sdl")
 
@@ -183,6 +184,26 @@ int sdl_list_monitors([[maybe_unused]] SdlContext* sdl)
 	return TRUE;
 }
 
+/* Anything smaller is not a real display, and servers re-mode their displays to what the client
+ * announces. */
+[[nodiscard]] static BOOL sdl_validate_monitors(SdlContext* sdl,
+                                                const std::vector<rdpMonitor>& monitors)
+{
+	for (const auto& monitor : monitors)
+	{
+		if ((monitor.width >= DISPLAY_CONTROL_MIN_MONITOR_WIDTH) &&
+		    (monitor.height >= DISPLAY_CONTROL_MIN_MONITOR_HEIGHT))
+			continue;
+		WLog_Print(sdl->getWLog(), WLOG_ERROR,
+		           "display %" PRIu32 " measured %" PRId32 "x%" PRId32
+		           ", below the %dx%d minimum; not connecting",
+		           monitor.orig_screen, monitor.width, monitor.height,
+		           DISPLAY_CONTROL_MIN_MONITOR_WIDTH, DISPLAY_CONTROL_MIN_MONITOR_HEIGHT);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 [[nodiscard]] static BOOL sdl_apply_display_properties(SdlContext* sdl)
 {
 	WINPR_ASSERT(sdl);
@@ -204,6 +225,8 @@ int sdl_list_monitors([[maybe_unused]] SdlContext* sdl)
 			monitor.x = 0;
 			monitor.y = 0;
 			monitors.emplace_back(monitor);
+			if (!sdl_validate_monitors(sdl, monitors))
+				return FALSE;
 			return freerdp_settings_set_monitor_def_array_sorted(settings, monitors.data(),
 			                                                     monitors.size());
 		}
@@ -227,6 +250,8 @@ int sdl_list_monitors([[maybe_unused]] SdlContext* sdl)
 	if (!monitors.empty() && std::none_of(monitors.cbegin(), monitors.cend(),
 	                                      [](const rdpMonitor& m) { return m.is_primary; }))
 		monitors.at(0).is_primary = true;
+	if (!sdl_validate_monitors(sdl, monitors))
+		return FALSE;
 	if (!freerdp_settings_set_monitor_def_array_sorted(settings, monitors.data(), monitors.size()))
 		return FALSE;
 
