@@ -116,7 +116,8 @@ namespace
 		/* Precise deltas are points, as a local scroll view applies them; the rest are lines.
 		 * A macOS server posts 100 pixels per 120-unit notch, so 1.2 units keep a point a point. */
 		const bool precise = event.hasPreciseScrollingDeltas;
-		const double unit = precise ? 1.2 : 120.0;
+		static const double speed = SdlPref::instance()->get_int("ScrollSpeedPercent", 100) / 100.0;
+		const double unit = (precise ? 1.2 : 120.0) * speed;
 		double x = -(precise ? event.scrollingDeltaX : event.deltaX) * unit;
 		double y = (precise ? event.scrollingDeltaY : event.deltaY) * unit;
 		if (event.directionInvertedFromDevice &&
