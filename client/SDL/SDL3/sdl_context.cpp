@@ -19,6 +19,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+
+#if defined(__APPLE__)
+#include <CoreVideo/CoreVideo.h>
+#endif
 
 #include "sdl_context.hpp"
 #include "sdl_config.hpp"
@@ -35,10 +40,22 @@
 
 static constexpr auto sdl_allow_screensaver = "sdl-allow-screensaver";
 
+static void releaseFramebuffer(void* framebuffer)
+{
+#if defined(__APPLE__)
+	auto pixelBuffer = static_cast<CVPixelBufferRef>(framebuffer);
+	CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+	CVPixelBufferRelease(pixelBuffer);
+#else
+	WINPR_UNUSED(framebuffer);
+#endif
+}
+
 SdlContext::SdlContext(rdpContext* context)
     : _context(context), _log(WLog_Get(CLIENT_TAG("SDL"))), _cursor(nullptr, sdl_Pointer_FreeCopy),
-      _rdpThreadRunning(false), _primary(nullptr, SDL_DestroySurface), _disp(this), _input(this),
-      _clip(this), _rail(this), _dialog(_log)
+      _rdpThreadRunning(false), _primary(nullptr, SDL_DestroySurface),
+      _framebuffer(nullptr, releaseFramebuffer), _disp(this), _input(this), _clip(this),
+      _rail(this), _dialog(_log)
 {
 	WINPR_ASSERT(context);
 	setMetadata();
@@ -117,6 +134,7 @@ void SdlContext::cleanup()
 	_windows.clear();
 	_dialog.destroy();
 	_primary.reset();
+	_framebuffer.reset();
 }
 
 bool SdlContext::shallAbort(bool ignoreDialogs)
@@ -275,7 +293,18 @@ BOOL SdlContext::postConnect(freerdp* instance)
 		return FALSE;
 
 	sdl->_sdlPixelFormat = SDL_PIXELFORMAT_BGRA32;
-	if (!gdi_init(instance, PIXEL_FORMAT_BGRA32))
+	BYTE* buffer = nullptr;
+	UINT32 stride = 0;
+	if (sdl->createFramebuffer(
+	        freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopWidth),
+	        freerdp_settings_get_uint32(context->settings, FreeRDP_DesktopHeight), &buffer,
+	        &stride))
+	{
+		WLog_Print(sdl->getWLog(), WLOG_DEBUG, "framebuffer shared with the renderer (IOSurface)");
+		if (!gdi_init_ex(instance, PIXEL_FORMAT_BGRA32, stride, buffer, nullptr))
+			return FALSE;
+	}
+	else if (!gdi_init(instance, PIXEL_FORMAT_BGRA32))
 		return FALSE;
 
 	if (!sdl->createPrimary())
@@ -336,6 +365,60 @@ void SdlContext::postFinalDisconnect(freerdp* instance)
 	                                   sdl_OnUserNotificationEventHandler);
 }
 
+/* On macOS with the Metal renderer the framebuffer is an IOSurface that the window textures are
+ * created from, so frames reach the GPU without an upload (which Metal compresses on the CPU). */
+bool SdlContext::createFramebuffer(UINT32 width, UINT32 height, BYTE** data, UINT32* stride)
+{
+	WINPR_ASSERT(data);
+	WINPR_ASSERT(stride);
+
+	_framebuffer.reset();
+#if defined(__APPLE__)
+	if (_windows.empty())
+		return false;
+	for (const auto& window : _windows)
+	{
+		const char* name = SDL_GetRendererName(window.second.renderer());
+		if (!name || (strcmp(name, "metal") != 0))
+			return false;
+	}
+
+	CFDictionaryRef empty =
+	    CFDictionaryCreate(nullptr, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks,
+	                       &kCFTypeDictionaryValueCallBacks);
+	const void* keys[] = { kCVPixelBufferIOSurfacePropertiesKey,
+	                       kCVPixelBufferMetalCompatibilityKey };
+	const void* values[] = { empty, kCFBooleanTrue };
+	CFDictionaryRef attributes =
+	    CFDictionaryCreate(nullptr, keys, values, ARRAYSIZE(keys), &kCFTypeDictionaryKeyCallBacks,
+	                       &kCFTypeDictionaryValueCallBacks);
+	CFRelease(empty);
+
+	CVPixelBufferRef pixelBuffer = nullptr;
+	const auto rc = CVPixelBufferCreate(nullptr, width, height, kCVPixelFormatType_32BGRA,
+	                                    attributes, &pixelBuffer);
+	CFRelease(attributes);
+	if (rc != kCVReturnSuccess)
+		return false;
+	if (CVPixelBufferLockBaseAddress(pixelBuffer, 0) != kCVReturnSuccess)
+	{
+		CVPixelBufferRelease(pixelBuffer);
+		return false;
+	}
+
+	*data = static_cast<BYTE*>(CVPixelBufferGetBaseAddress(pixelBuffer));
+	*stride = static_cast<UINT32>(CVPixelBufferGetBytesPerRow(pixelBuffer));
+	_framebuffer.reset(pixelBuffer);
+	return true;
+#else
+	WINPR_UNUSED(width);
+	WINPR_UNUSED(height);
+	*data = nullptr;
+	*stride = 0;
+	return false;
+#endif
+}
+
 /* Create a SDL surface from the GDI buffer */
 bool SdlContext::createPrimary()
 {
@@ -350,6 +433,9 @@ bool SdlContext::createPrimary()
 		return false;
 
 	SDL_SetSurfaceBlendMode(_primary.get(), SDL_BLENDMODE_NONE);
+	if (_framebuffer)
+		SDL_SetPointerProperty(SDL_GetSurfaceProperties(_primary.get()),
+		                       SdlWindow::framebufferProperty(), _framebuffer.get());
 	SDL_Rect surfaceRect = { 0, 0, gdi->width, gdi->height };
 	SDL_FillSurfaceRect(_primary.get(), &surfaceRect,
 	                    SDL_MapSurfaceRGBA(_primary.get(), 0, 0, 0, 0xff));
@@ -1784,8 +1870,26 @@ BOOL SdlContext::desktopResize(rdpContext* context)
 
 	std::unique_lock lock(sdl->_critical);
 	gdi = context->gdi;
-	if (!gdi_resize(gdi, freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
-	                freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)))
+	const auto width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+	const auto height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+	if (sdl->_framebuffer && ((static_cast<UINT32>(gdi->width) != width) ||
+	                          (static_cast<UINT32>(gdi->height) != height)))
+	{
+		/* The old framebuffer stays alive until gdi no longer uses it. */
+		auto old = std::move(sdl->_framebuffer);
+		BYTE* buffer = nullptr;
+		UINT32 stride = 0;
+		if (sdl->createFramebuffer(width, height, &buffer, &stride))
+		{
+			if (!gdi_resize_ex(gdi, width, height, stride, 0, buffer, nullptr))
+				return FALSE;
+			return sdl->createPrimary();
+		}
+		if (!gdi_resize_ex(gdi, width, height, 0, 0, nullptr, winpr_aligned_free))
+			return FALSE;
+		return sdl->createPrimary();
+	}
+	if (!gdi_resize(gdi, width, height))
 		return FALSE;
 	return sdl->createPrimary();
 }
