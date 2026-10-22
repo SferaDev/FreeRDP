@@ -74,6 +74,7 @@
 #include "sdl_monitor.hpp"
 #include "sdl_pointer.hpp"
 #include "sdl_prefs.hpp"
+#include "sdl_scroll_macos.hpp"
 #if defined(_WIN32)
 #include "sdl_win32_console.hpp"
 #endif
@@ -677,6 +678,9 @@ int main(int argc, char* argv[])
 		return -1;
 	if (!SDL_SetHint(SDL_HINT_TRACKPAD_IS_TOUCH_ONLY, "1"))
 		return -1;
+	/* SDL otherwise opts out of momentum events, so a trackpad scroll stops dead on lift-off. */
+	if (!SDL_SetHint(SDL_HINT_MAC_SCROLL_MOMENTUM, "1"))
+		return -1;
 	if (!SDL_SetHint(SDL_HINT_SCREENSAVER_INHIBIT_ACTIVITY_NAME, "RDP session running"))
 		return -1;
 #if SDL_VERSION_ATLEAST(3, 4, 0)
@@ -696,11 +700,14 @@ int main(int argc, char* argv[])
 	auto backend = SDL_GetCurrentVideoDriver();
 	WLog_Print(sdl->getWLog(), WLOG_DEBUG, "client is using backend '%s'", backend);
 	sdl_dialogs_init();
+	if (!sdl_scroll_monitor_install(sdl))
+		WLog_Print(sdl->getWLog(), WLOG_DEBUG, "scrolling through SDL wheel events");
 
 	/* SDL cleanup code if the client exits */
 	ScopeGuard guard(
 	    [&]()
 	    {
+		    sdl_scroll_monitor_uninstall();
 		    sdl->cleanup();
 		    freerdp_del_signal_cleanup_handler(sdl->context(), sdl_term_handler);
 		    sdl_dialogs_uninit();

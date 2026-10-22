@@ -22,12 +22,17 @@
 #include "sdl_touch.hpp"
 #include "sdl_context.hpp"
 #include "sdl_prefs.hpp"
+#include "sdl_scroll_macos.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 #include <winpr/wtypes.h>
 #include <winpr/assert.h>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/channels/ainput.h>
 
 #include <SDL3/SDL.h>
 
@@ -123,6 +128,9 @@ bool SdlTouch::handleEvent(SdlContext* sdl, const SDL_MouseWheelEvent& ev)
 {
 	WINPR_ASSERT(sdl);
 
+	if (sdl_scroll_monitor_active())
+		return TRUE;
+
 	const bool flipped = (ev.direction == SDL_MOUSEWHEEL_FLIPPED) &&
 	                     !SdlPref::instance()->get_bool("UseLocalMouseScrollDirection");
 
@@ -133,25 +141,57 @@ bool SdlTouch::handleEvent(SdlContext* sdl, const SDL_MouseWheelEvent& ev)
 	const Uint64 now = SDL_GetTicks();
 	if ((ev.x != SDL_truncf(ev.x)) || (ev.y != SDL_truncf(ev.y)))
 		lastPrecise = now;
-	const float unit = (lastPrecise != 0) && (now - lastPrecise < 500) ? 12.0f : 120.0f;
+	const double unit = (lastPrecise != 0) && (now - lastPrecise < 500) ? 12.0 : 120.0;
+	const double sign = flipped ? -1.0 : 1.0;
 
-	const auto x = static_cast<INT32>(ev.x * (flipped ? -1.0f : 1.0f) * unit);
-	const auto y = static_cast<INT32>(ev.y * (flipped ? -1.0f : 1.0f) * unit);
-	UINT16 flags = 0;
+	return sendScroll(sdl, ev.x * sign * unit, ev.y * sign * unit, 0);
+}
 
-	if (y != 0)
+bool SdlTouch::sendScroll(SdlContext* sdl, double x, double y, UINT64 ext)
+{
+	WINPR_ASSERT(sdl);
+	auto cctx = sdl->common();
+	WINPR_ASSERT(cctx);
+
+#if defined(CHANNEL_AINPUT_CLIENT)
+	/* ainput carries 16.16 fixed point, so no fraction of a pixel is lost. */
+	if (cctx->ainput)
 	{
-		flags |= PTR_FLAGS_WHEEL;
-		if (!send_mouse_wheel(sdl, flags, y))
-			return false;
-	}
+		if (freerdp_get_state(&cctx->context) != CONNECTION_STATE_ACTIVE)
+			return TRUE;
 
-	if (x != 0)
-	{
-		flags |= PTR_FLAGS_HWHEEL;
-		if (!send_mouse_wheel(sdl, flags, x))
-			return false;
+		auto fixed = [](double v)
+		{
+			const double f = std::round(v * 0x10000);
+			return static_cast<INT32>(std::clamp(f, static_cast<double>(INT32_MIN),
+			                                     static_cast<double>(INT32_MAX)));
+		};
+		WINPR_ASSERT(cctx->ainput->AInputSendInputEvent);
+		if (cctx->ainput->AInputSendInputEvent(cctx->ainput, AINPUT_FLAGS_WHEEL | ext, fixed(x),
+		                                       fixed(y)) == CHANNEL_RC_OK)
+			return TRUE;
 	}
+#endif
+
+	/* Wheel PDUs carry whole units; keep the fractions for the next event. */
+	static double restX = 0.0;
+	static double restY = 0.0;
+	auto whole = [](double& rest, double v)
+	{
+		if ((v != 0.0) && ((rest < 0.0) != (v < 0.0)))
+			rest = 0.0;
+		rest += v;
+		const double w = std::trunc(rest);
+		rest -= w;
+		return static_cast<INT32>(w);
+	};
+	const INT32 wy = whole(restY, y);
+	const INT32 wx = whole(restX, x);
+
+	if ((wy != 0) && !send_mouse_wheel(sdl, PTR_FLAGS_WHEEL, wy))
+		return FALSE;
+	if ((wx != 0) && !send_mouse_wheel(sdl, PTR_FLAGS_HWHEEL, wx))
+		return FALSE;
 	return TRUE;
 }
 
