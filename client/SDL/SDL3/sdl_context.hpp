@@ -97,6 +97,14 @@ class SdlContext
 
 	void push(std::vector<SDL_Rect>&& rects);
 	[[nodiscard]] std::vector<SDL_Rect> pop();
+	/* Takes all queued damage; sinceNS is when the oldest was queued (latency trace clock). */
+	[[nodiscard]] std::vector<SDL_Rect> popAll(Uint64& sinceNS);
+	/* Allows the next endPaint to wake the UI thread again. */
+	void clearUpdatePending();
+
+	/* Presents windows whose paced present is due; returns the wait until the next one. */
+	[[nodiscard]] bool flushPacedPresents();
+	[[nodiscard]] Sint64 nextPacedPresentNS() const;
 
 	void setHasCursor(bool val);
 	[[nodiscard]] bool hasCursor() const;
@@ -111,7 +119,7 @@ class SdlContext
 	[[nodiscard]] bool updateWindowList();
 	[[nodiscard]] bool updateWindow(SDL_WindowID id);
 
-	[[nodiscard]] bool drawToWindows(const std::vector<SDL_Rect>& rects = {});
+	[[nodiscard]] bool drawToWindows(const std::vector<SDL_Rect>& rects = {}, Uint64 sinceNS = 0);
 	[[nodiscard]] bool drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& rects = {});
 	[[nodiscard]] bool minimizeAllWindows();
 	[[nodiscard]] int exitCode() const;
@@ -220,6 +228,10 @@ class SdlContext
 	std::vector<SDL_DisplayID> _monitorIds;
 	std::mutex _queue_mux;
 	std::queue<std::vector<SDL_Rect>> _queue;
+	Uint64 _queueSinceNS = 0;
+	std::atomic<bool> _updatePending = false;
+	Uint64 _drawSinceNS = 0;
+	bool _pacePresents = true;
 	/* SDL */
 	bool _fullscreen = false;
 	bool _resizeable = false;

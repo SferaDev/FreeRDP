@@ -101,6 +101,23 @@ class SdlWindow
 	                      bool dashedBorder = true);
 	void updateSurface();
 
+	/* Draws the surface area straight to the window, without the render target pass, when the
+	 * window's texture shares the surface's memory. False when it does not. */
+	[[nodiscard]] bool presentShared(SDL_Surface* surface, SDL_Point offset, const SDL_Rect& area);
+	/* False once presentShared drew past the render target, which then misses that content. */
+	[[nodiscard]] bool renderTargetCurrent() const;
+	[[nodiscard]] bool sharesSurface() const;
+
+	struct PresentPacing
+	{
+		Uint64 lastNS = 0;
+		Uint64 deferredAtNS = 0;
+		Uint64 damageSinceNS = 0; /* latency trace clock */
+		bool pending = false;
+	};
+	[[nodiscard]] PresentPacing& pacing();
+	[[nodiscard]] Uint64 refreshIntervalNS() const;
+
   protected:
 	SdlWindow(SDL_DisplayID id, const std::string& title, const SDL_Rect& rect, Uint32 flags);
 	SdlWindow(SDL_Window* parent, const SDL_Rect& rect, bool transparent, bool tooltip);
@@ -136,6 +153,8 @@ class SdlWindow
 	int _gdiTextureH = 0;
 	void* _gdiTextureSource = nullptr;
 	bool _gdiTextureShared = false;
+	bool _renderTargetCurrent = true;
+	PresentPacing _pacing;
 	int _initialW = 0;
 	int _initialH = 0;
 	SDL_DisplayID _displayID = 0;

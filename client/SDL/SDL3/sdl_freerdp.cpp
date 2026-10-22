@@ -70,6 +70,7 @@
 #include "scoped_guard.hpp"
 #include "sdl_channels.hpp"
 #include "sdl_freerdp.hpp"
+#include <freerdp/utils/latency_trace.h>
 #include "sdl_context.hpp"
 #include "sdl_monitor.hpp"
 #include "sdl_pointer.hpp"
@@ -169,8 +170,18 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 		while (!sdl->shallAbort())
 		{
 			SDL_Event windowEvent = {};
-			while (!sdl->shallAbort() && SDL_WaitEventTimeout(nullptr, 1000))
+			const auto waitMS = [sdl]()
 			{
+				const auto paced = sdl->nextPacedPresentNS();
+				if (paced < 0)
+					return Sint32{ 1000 };
+				return static_cast<Sint32>((paced + SDL_NS_PER_MS - 1) / SDL_NS_PER_MS);
+			};
+			while (!sdl->shallAbort() && SDL_WaitEventTimeout(nullptr, waitMS()))
+			{
+				if (!sdl->flushPacedPresents())
+					throw ErrorMsg{ -1, 0, "sdl->flushPacedPresents" };
+
 				/* Only poll standard SDL events and SDL_EVENT_USERS meant to create
 				 * dialogs. do not process the dialog return value events here.
 				 */
@@ -181,6 +192,10 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 					if (sdl_log_error(prc, sdl->getWLog(), "SDL_PeepEvents"))
 						continue;
 				}
+				/* Only dialog results are pending; handling the previous event again would
+				 * repeat it. */
+				if (prc == 0)
+					continue;
 
 				WLog_Print(sdl->getWLog(), WLOG_TRACE, "got event %s [0x%08" PRIx32 "]",
 				           sdl::utils::toString(windowEvent.type).c_str(), windowEvent.type);
@@ -192,6 +207,26 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 
 				if (!sdl->handleEvent(windowEvent))
 					throw ErrorMsg{ -1, windowEvent.type, "sdl->handleEvent" };
+
+				switch (windowEvent.type)
+				{
+					case SDL_EVENT_KEY_DOWN:
+					case SDL_EVENT_KEY_UP:
+					case SDL_EVENT_MOUSE_MOTION:
+					case SDL_EVENT_MOUSE_BUTTON_DOWN:
+					case SDL_EVENT_MOUSE_BUTTON_UP:
+					case SDL_EVENT_MOUSE_WHEEL:
+					{
+						const auto now = SDL_GetTicksNS();
+						if (freerdp_latency_trace_enabled() && (windowEvent.common.timestamp != 0) &&
+						    (now >= windowEvent.common.timestamp))
+							freerdp_latency_trace_record(FREERDP_LATENCY_INPUT,
+							                             now - windowEvent.common.timestamp);
+					}
+						break;
+					default:
+						break;
+				}
 
 				switch (windowEvent.type)
 				{
@@ -238,11 +273,16 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 						/* Draw everything queued so far once: drawing batch by batch until the
 						 * queue is empty never returns to the event loop when frames arrive
 						 * faster than they are drawn. */
-						std::vector<SDL_Rect> rectangles;
-						for (auto next = sdl->pop(); !next.empty(); next = sdl->pop())
-							rectangles.insert(rectangles.end(), next.begin(), next.end());
-						if (!sdl->drawToWindows(rectangles))
+						sdl->clearUpdatePending();
+						Uint64 since = 0;
+						const auto rectangles = sdl->popAll(since);
+						freerdp_latency_trace_since(FREERDP_LATENCY_UI_QUEUE, since);
+						const auto traceStart =
+						    freerdp_latency_trace_enabled() ? freerdp_latency_trace_now() : 0;
+						if (!sdl->drawToWindows(rectangles, since))
 							throw ErrorMsg{ -1, windowEvent.type, "sdl->drawToWindows" };
+						if (!rectangles.empty())
+							freerdp_latency_trace_since(FREERDP_LATENCY_UI_DRAW, traceStart);
 					}
 					break;
 					case SDL_EVENT_USER_CREATE_WINDOWS:
@@ -309,6 +349,8 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 						break;
 				}
 			}
+			if (!sdl->flushPacedPresents())
+				throw ErrorMsg{ -1, 0, "sdl->flushPacedPresents" };
 		}
 		rc = 1;
 	}

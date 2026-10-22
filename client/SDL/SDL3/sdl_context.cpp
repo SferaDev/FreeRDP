@@ -37,6 +37,7 @@
 
 #include "dialogs/sdl_dialogs.hpp"
 #include <freerdp/client/aad_helper.h>
+#include <freerdp/utils/latency_trace.h>
 
 static constexpr auto sdl_allow_screensaver = "sdl-allow-screensaver";
 
@@ -59,6 +60,11 @@ SdlContext::SdlContext(rdpContext* context)
 {
 	WINPR_ASSERT(context);
 	setMetadata();
+
+	{
+		const char* pacing = SDL_getenv("FREERDP_SDL_PRESENT_PACING");
+		_pacePresents = !pacing || (strcmp(pacing, "0") != 0);
+	}
 
 	auto instance = _context->instance;
 	WINPR_ASSERT(instance);
@@ -664,6 +670,10 @@ BOOL SdlContext::endPaint(rdpContext* context)
 	}
 
 	sdl->push(std::move(rects));
+	/* One wake-up covers everything queued until the UI thread takes it; an event per frame
+	 * floods the queue ahead of input events. */
+	if (sdl->_updatePending.exchange(true))
+		return TRUE;
 	return sdl_push_user_event(SDL_EVENT_USER_UPDATE);
 }
 
@@ -1015,6 +1025,10 @@ void SdlContext::updateMonitorDataFromOffsets()
 
 bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& rects)
 {
+	auto& pacing = window.pacing();
+	const bool wasPending = pacing.pending;
+	pacing.pending = false;
+
 	if (!isConnected())
 		return true;
 
@@ -1051,7 +1065,9 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 		_localScale = { static_cast<float>(size.w) / static_cast<float>(gdi->width),
 			            static_cast<float>(size.h) / static_cast<float>(gdi->height) };
 		if (!window.drawScaledRects(surface, _localScale,
-		                            window.stale() ? std::vector<SDL_Rect>{} : rects))
+		                            (window.stale() || !window.renderTargetCurrent())
+		                                ? std::vector<SDL_Rect>{}
+		                                : rects))
 			return false;
 	}
 	else
@@ -1071,8 +1087,47 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 		if (!SDL_GetRectIntersection(&area, &surfaceRect, &area))
 			return true;
 
+		if (!rects.empty() && !window.stale() && !wasPending)
+		{
+			/* Damage elsewhere on the desktop does not concern this window. */
+			const bool hit = std::any_of(rects.begin(), rects.end(), [&area](const SDL_Rect& r)
+			                             { return SDL_HasRectIntersection(&r, &area); });
+			if (!hit)
+				return true;
+		}
+		if ((pacing.damageSinceNS == 0) && (_drawSinceNS != 0))
+			pacing.damageSinceNS = _drawSinceNS;
+
+		const auto now = SDL_GetTicksNS();
+		const auto interval = window.refreshIntervalNS() * 3 / 4;
+		if (_pacePresents && window.sharesSurface() && (pacing.lastNS != 0) &&
+		    (now - pacing.lastNS < interval))
+		{
+			/* Presenting faster than the display refreshes blocks this thread in nextDrawable
+			 * and delays input; the shared texture is complete, so present it later instead. */
+			if (!wasPending)
+				pacing.deferredAtNS = now;
+			pacing.pending = true;
+			return true;
+		}
+
+		const auto traceStart = freerdp_latency_trace_enabled() ? freerdp_latency_trace_now() : 0;
+		if (window.presentShared(surface, offset, area))
+		{
+			freerdp_latency_trace_since(FREERDP_LATENCY_UI_PRESENT, traceStart);
+			freerdp_latency_trace_since(FREERDP_LATENCY_UI_SIGNAL_TO_PRESENT,
+			                            pacing.damageSinceNS);
+			if (wasPending && freerdp_latency_trace_enabled())
+				freerdp_latency_trace_record(FREERDP_LATENCY_UI_PACED, now - pacing.deferredAtNS);
+			pacing.damageSinceNS = 0;
+			pacing.lastNS = now;
+			window.setStale(false);
+			return true;
+		}
+
 		std::vector<SDL_Rect> damage;
-		for (const auto& rect : (rects.empty() || window.stale()) ? std::vector{ area } : rects)
+		const bool full = rects.empty() || window.stale() || !window.renderTargetCurrent();
+		for (const auto& rect : full ? std::vector{ area } : rects)
 		{
 			SDL_Rect clipped = {};
 			if (SDL_GetRectIntersection(&rect, &area, &clipped))
@@ -1096,7 +1151,11 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 	}
 
 	window.setStale(false);
+	const auto traceStart = freerdp_latency_trace_enabled() ? freerdp_latency_trace_now() : 0;
 	window.updateSurface();
+	freerdp_latency_trace_since(FREERDP_LATENCY_UI_PRESENT, traceStart);
+	freerdp_latency_trace_since(FREERDP_LATENCY_UI_SIGNAL_TO_PRESENT, pacing.damageSinceNS);
+	pacing.damageSinceNS = 0;
 	return true;
 }
 
@@ -1807,8 +1866,11 @@ bool SdlContext::useLocalScale() const
 	return !dynResize && !fs && !multimon;
 }
 
-bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects)
+bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects, Uint64 sinceNS)
 {
+	_drawSinceNS = sinceNS;
+	ScopeGuard resetSince([this]() { _drawSinceNS = 0; });
+
 	/* RAIL damage is per-window (_gfxDamage), not in the rects queue: repaint every tick. */
 	if (_rail.enabled())
 	{
@@ -1858,6 +1920,9 @@ bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects)
 
 	for (auto& window : _windows)
 	{
+		/* A wake-up without new damage only repaints the windows that missed a draw. */
+		if (rects.empty() && !firstShow && !window.second.stale())
+			continue;
 		if (!drawToWindow(window.second, drawRects))
 			return false;
 	}
@@ -2057,7 +2122,61 @@ int64_t SdlContext::monitorId(uint32_t index) const
 void SdlContext::push(std::vector<SDL_Rect>&& rects)
 {
 	std::unique_lock lock(_queue_mux);
+	if (_queue.empty() && freerdp_latency_trace_enabled())
+		_queueSinceNS = freerdp_latency_trace_now();
 	_queue.emplace(std::move(rects));
+}
+
+std::vector<SDL_Rect> SdlContext::popAll(Uint64& sinceNS)
+{
+	std::unique_lock lock(_queue_mux);
+	std::vector<SDL_Rect> rects;
+	sinceNS = _queue.empty() ? 0 : _queueSinceNS;
+	for (; !_queue.empty(); _queue.pop())
+		rects.insert(rects.end(), _queue.front().begin(), _queue.front().end());
+	_queueSinceNS = 0;
+	return rects;
+}
+
+void SdlContext::clearUpdatePending()
+{
+	_updatePending = false;
+}
+
+bool SdlContext::flushPacedPresents()
+{
+	if (!_pacePresents)
+		return true;
+	const auto now = SDL_GetTicksNS();
+	for (auto& window : _windows)
+	{
+		auto& pacing = window.second.pacing();
+		if (!pacing.pending)
+			continue;
+		const auto due = pacing.lastNS + (window.second.refreshIntervalNS() * 3 / 4);
+		if (now < due)
+			continue;
+		if (!drawToWindow(window.second))
+			return false;
+	}
+	return true;
+}
+
+Sint64 SdlContext::nextPacedPresentNS() const
+{
+	Sint64 wait = -1;
+	const auto now = SDL_GetTicksNS();
+	for (auto& window : _windows)
+	{
+		auto& w = const_cast<SdlWindow&>(window.second);
+		if (!w.pacing().pending)
+			continue;
+		const auto due = w.pacing().lastNS + (w.refreshIntervalNS() * 3 / 4);
+		const Sint64 left = (due > now) ? static_cast<Sint64>(due - now) : 0;
+		if ((wait < 0) || (left < wait))
+			wait = left;
+	}
+	return wait;
 }
 
 std::vector<SDL_Rect> SdlContext::pop()
