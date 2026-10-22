@@ -11,6 +11,10 @@
 #include <emscripten.h>
 #endif
 
+#if defined(__APPLE__) && defined(WINPR_HAVE_POLL_H)
+#include <sys/select.h>
+#endif
+
 #define TAG WINPR_TAG("sync.pollset")
 
 #ifdef WINPR_HAVE_POLL_H
@@ -121,6 +125,53 @@ BOOL pollset_add(WINPR_POLL_SET* set, int fd, ULONG mode)
 	return TRUE;
 }
 
+#if defined(__APPLE__) && defined(WINPR_HAVE_POLL_H)
+/* On macOS 27 a zero-timeout poll() on an fd that is not ready costs 80-200 us,
+ * against well under 1 us for select(). Zero-timeout waits run several times per
+ * received PDU, which capped the client at about 650 PDUs/s. */
+static int pollset_select_now(WINPR_POLL_SET* set)
+{
+	fd_set rset;
+	fd_set wset;
+	int maxFd = -1;
+
+	FD_ZERO(&rset);
+	FD_ZERO(&wset);
+	for (size_t i = 0; i < set->fillIndex; i++)
+	{
+		const struct pollfd* item = &set->pollset[i];
+		if ((item->fd < 0) || (item->fd >= FD_SETSIZE))
+			return -2;
+		if (item->events & POLLIN)
+			FD_SET(item->fd, &rset);
+		if (item->events & POLLOUT)
+			FD_SET(item->fd, &wset);
+		if (item->fd > maxFd)
+			maxFd = item->fd;
+	}
+
+	struct timeval zero = { 0 };
+	int ret = 0;
+	do
+	{
+		ret = select(maxFd + 1, &rset, &wset, nullptr, &zero);
+	} while ((ret < 0) && (errno == EINTR));
+	if (ret < 0)
+		return -2;
+
+	for (size_t i = 0; i < set->fillIndex; i++)
+	{
+		struct pollfd* item = &set->pollset[i];
+		item->revents = 0;
+		if ((item->events & POLLIN) && FD_ISSET(item->fd, &rset))
+			item->revents |= POLLIN;
+		if ((item->events & POLLOUT) && FD_ISSET(item->fd, &wset))
+			item->revents |= POLLOUT;
+	}
+	return ret;
+}
+#endif
+
 int pollset_poll(WINPR_POLL_SET* set, DWORD dwMilliseconds)
 {
 	WINPR_ASSERT(set);
@@ -136,6 +187,15 @@ int pollset_poll(WINPR_POLL_SET* set, DWORD dwMilliseconds)
 
 #ifdef WINPR_HAVE_POLL_H
 	int timeout = 0;
+
+#if defined(__APPLE__)
+	if (dwMilliseconds == 0)
+	{
+		const int status = pollset_select_now(set);
+		if (status != -2)
+			return status;
+	}
+#endif
 
 	do
 	{
