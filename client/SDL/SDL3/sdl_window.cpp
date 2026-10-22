@@ -81,7 +81,9 @@ SdlWindow::SdlWindow(SdlWindow&& other) noexcept
     : _window(other._window), _renderer(other._renderer), _renderTarget(other._renderTarget),
       _gdiTexture(other._gdiTexture), _gdiTextureW(other._gdiTextureW),
       _gdiTextureH(other._gdiTextureH), _gdiTextureSource(other._gdiTextureSource),
-      _gdiTextureShared(other._gdiTextureShared), _initialW(other._initialW),
+      _gdiTextureShared(other._gdiTextureShared),
+      _renderTargetCurrent(other._renderTargetCurrent), _pacing(other._pacing),
+      _initialW(other._initialW),
       _initialH(other._initialH), _displayID(other._displayID), _offset_x(other._offset_x),
       _offset_y(other._offset_y), _monitor(other._monitor), _stale(other._stale)
 {
@@ -680,12 +682,56 @@ bool SdlWindow::blit(SDL_Surface* surface, const SDL_Rect& srcRect, SDL_Rect& ds
 	return true;
 }
 
+bool SdlWindow::presentShared(SDL_Surface* surface, SDL_Point offset, const SDL_Rect& area)
+{
+	if (!_renderer || !surface || !ensureGdiTexture(surface) || !_gdiTextureShared)
+		return false;
+	if (!SDL_SetRenderTarget(_renderer, nullptr))
+		return false;
+
+	std::ignore = SDL_SetRenderDrawColor(_renderer, 0x00, 0x00, 0x00, 0x00);
+	std::ignore = SDL_RenderClear(_renderer);
+	const SDL_FRect src = { static_cast<float>(area.x), static_cast<float>(area.y),
+		                    static_cast<float>(area.w), static_cast<float>(area.h) };
+	const SDL_FRect dst = { static_cast<float>(area.x + offset.x),
+		                    static_cast<float>(area.y + offset.y), static_cast<float>(area.w),
+		                    static_cast<float>(area.h) };
+	if (!SDL_RenderTexture(_renderer, _gdiTexture, &src, &dst))
+		return false;
+	_renderTargetCurrent = false;
+	return SDL_RenderPresent(_renderer);
+}
+
+bool SdlWindow::renderTargetCurrent() const
+{
+	return _renderTargetCurrent;
+}
+
+bool SdlWindow::sharesSurface() const
+{
+	return _gdiTextureShared;
+}
+
+SdlWindow::PresentPacing& SdlWindow::pacing()
+{
+	return _pacing;
+}
+
+Uint64 SdlWindow::refreshIntervalNS() const
+{
+	const auto mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(_window));
+	if (!mode || (mode->refresh_rate <= 0.0F))
+		return 0;
+	return static_cast<Uint64>(1e9 / static_cast<double>(mode->refresh_rate));
+}
+
 void SdlWindow::updateSurface()
 {
 	if (!_renderer)
 		return;
 
 	ensureRenderTarget();
+	_renderTargetCurrent = true;
 
 	/* Copy accumulated render target to screen and present */
 	if (!SDL_SetRenderTarget(_renderer, nullptr))
