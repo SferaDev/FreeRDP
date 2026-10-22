@@ -1940,6 +1940,11 @@ BOOL SdlContext::desktopResize(rdpContext* context)
 	gdi = context->gdi;
 	const auto width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
 	const auto height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+	/* A graphics reset keeps the size on reconnects and surface remaps; clearing the primary
+	 * would show black wherever a window redraws before the new surfaces paint. */
+	if (sdl->_primary && (static_cast<UINT32>(gdi->width) == width) &&
+	    (static_cast<UINT32>(gdi->height) == height))
+		return TRUE;
 	if (sdl->_framebuffer && ((static_cast<UINT32>(gdi->width) != width) ||
 	                          (static_cast<UINT32>(gdi->height) != height)))
 	{
