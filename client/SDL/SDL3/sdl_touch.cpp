@@ -125,8 +125,18 @@ bool SdlTouch::handleEvent(SdlContext* sdl, const SDL_MouseWheelEvent& ev)
 
 	const bool flipped = (ev.direction == SDL_MOUSEWHEEL_FLIPPED) &&
 	                     !SdlPref::instance()->get_bool("UseLocalMouseScrollDirection");
-	const auto x = static_cast<INT32>(ev.x * (flipped ? -1.0f : 1.0f) * 120.0f);
-	const auto y = static_cast<INT32>(ev.y * (flipped ? -1.0f : 1.0f) * 120.0f);
+
+	/* Trackpads and high-resolution wheels report pixel deltas that SDL scales to tenths of a
+	 * line; only notched wheels send whole lines. A fraction marks a precise stream, which may
+	 * still carry whole values, so keep treating it as precise for a moment. */
+	static Uint64 lastPrecise = 0;
+	const Uint64 now = SDL_GetTicks();
+	if ((ev.x != SDL_truncf(ev.x)) || (ev.y != SDL_truncf(ev.y)))
+		lastPrecise = now;
+	const float unit = (lastPrecise != 0) && (now - lastPrecise < 500) ? 12.0f : 120.0f;
+
+	const auto x = static_cast<INT32>(ev.x * (flipped ? -1.0f : 1.0f) * unit);
+	const auto y = static_cast<INT32>(ev.y * (flipped ? -1.0f : 1.0f) * unit);
 	UINT16 flags = 0;
 
 	if (y != 0)
