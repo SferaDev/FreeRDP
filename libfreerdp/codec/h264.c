@@ -187,6 +187,17 @@ INT32 avc420_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize
 	if (!areRectsValid(h264->log, nDstWidth, nDstHeight, regionRects, numRegionRects))
 		return -1013;
 
+	if (h264->rgbOutput && h264->subsystem->DecompressToRGB)
+	{
+		if (!areRectsValid(h264->log, h264->width, h264->height, regionRects, numRegionRects))
+			return -1016;
+		status = h264->subsystem->DecompressToRGB(h264, pSrcData, SrcSize, pDstData, DstFormat,
+		                                          nDstStep, regionRects, numRegionRects);
+		if (status < 0)
+			WLog_Print(h264->log, WLOG_WARN, "H264 decompress failed with %d", status);
+		return (status < 0) ? status : 1;
+	}
+
 	status = log_decompress(h264, pSrcData, SrcSize, regionRects, numRegionRects);
 
 	if (status == 0)

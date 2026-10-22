@@ -20,12 +20,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <Accelerate/Accelerate.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 #include <VideoToolbox/VideoToolbox.h>
 
 #include <winpr/assert.h>
+#include <winpr/environment.h>
+#include <winpr/string.h>
 #include <freerdp/log.h>
+#include <freerdp/primitives.h>
 
 #include "h264.h"
 
@@ -46,6 +50,7 @@ typedef struct
 	BOOL needsIdr;
 	UINT32 ppsId;
 	OSType pixelFormat;
+	vImage_YpCbCrToARGB yuvToRgb;
 	H264_VT_PARAMETER_SET sps[32];
 	H264_VT_PARAMETER_SET pps[256];
 } H264_CONTEXT_VIDEOTOOLBOX;
@@ -548,6 +553,100 @@ fail:
 	return result;
 }
 
+/* vImage writes ARGB8888 through a permute map, so any byte order with 8 bit channels works. */
+WINPR_ATTR_NODISCARD
+static BOOL videotoolbox_permute_map(DWORD format, uint8_t map[4])
+{
+	const uint8_t a = 0;
+	const uint8_t r = 1;
+	const uint8_t g = 2;
+	const uint8_t b = 3;
+	switch (format)
+	{
+		case PIXEL_FORMAT_BGRA32:
+		case PIXEL_FORMAT_BGRX32:
+			map[0] = b, map[1] = g, map[2] = r, map[3] = a;
+			return TRUE;
+		case PIXEL_FORMAT_RGBA32:
+		case PIXEL_FORMAT_RGBX32:
+			map[0] = r, map[1] = g, map[2] = b, map[3] = a;
+			return TRUE;
+		case PIXEL_FORMAT_ARGB32:
+		case PIXEL_FORMAT_XRGB32:
+			map[0] = a, map[1] = r, map[2] = g, map[3] = b;
+			return TRUE;
+		case PIXEL_FORMAT_ABGR32:
+		case PIXEL_FORMAT_XBGR32:
+			map[0] = a, map[1] = b, map[2] = g, map[3] = r;
+			return TRUE;
+		default:
+			return FALSE;
+	}
+}
+
+WINPR_ATTR_NODISCARD
+static int videotoolbox_decompress_to_rgb(H264_CONTEXT* WINPR_RESTRICT h264,
+                                          const BYTE* WINPR_RESTRICT data, UINT32 size,
+                                          BYTE* WINPR_RESTRICT pDstData, DWORD DstFormat,
+                                          UINT32 nDstStep,
+                                          const RECTANGLE_16* WINPR_RESTRICT regionRects,
+                                          UINT32 numRegionRects)
+{
+	WINPR_ASSERT(h264);
+	WINPR_ASSERT(pDstData);
+	WINPR_ASSERT(regionRects || (numRegionRects == 0));
+
+	H264_CONTEXT_VIDEOTOOLBOX* sys = h264->pSystemData;
+	WINPR_ASSERT(sys);
+
+	const int status = videotoolbox_decompress(h264, data, size);
+	if (status <= 0)
+		return status;
+
+	uint8_t map[4] = WINPR_C_ARRAY_INIT;
+	const BOOL useVImage = videotoolbox_permute_map(DstFormat, map);
+	const size_t bpp = FreeRDPGetBytesPerPixel(DstFormat);
+	primitives_t* prims = primitives_get();
+
+	for (UINT32 x = 0; x < numRegionRects; x++)
+	{
+		const RECTANGLE_16* rect = &regionRects[x];
+		/* krdc sends frames smaller than the surface, see log_decompress */
+		if ((rect->right > h264->YUVWidth) || (rect->bottom > h264->YUVHeight))
+			return -1015;
+
+		const UINT32 width = rect->right - rect->left;
+		const UINT32 height = rect->bottom - rect->top;
+		BYTE* dst = pDstData + 1ULL * rect->top * nDstStep + 1ULL * rect->left * bpp;
+		const BYTE* yuv[3] = {
+			h264->pYUVData[0] + 1ULL * rect->top * h264->iStride[0] + rect->left,
+			h264->pYUVData[1] + 1ULL * rect->top / 2 * h264->iStride[1] + rect->left / 2,
+			h264->pYUVData[2] + 1ULL * rect->top / 2 * h264->iStride[2] + rect->left / 2
+		};
+
+		if (useVImage)
+		{
+			const vImage_Buffer y = { WINPR_CAST_CONST_PTR_AWAY(yuv[0], void*), height, width,
+			                          h264->iStride[0] };
+			const vImage_Buffer cb = { WINPR_CAST_CONST_PTR_AWAY(yuv[1], void*), (height + 1) / 2,
+			                           (width + 1) / 2, h264->iStride[1] };
+			const vImage_Buffer cr = { WINPR_CAST_CONST_PTR_AWAY(yuv[2], void*), (height + 1) / 2,
+			                           (width + 1) / 2, h264->iStride[2] };
+			const vImage_Buffer out = { dst, height, width, nDstStep };
+			/* Internal tiling costs more CPU than it saves latency at these sizes. */
+			if (vImageConvert_420Yp8_Cb8_Cr8ToARGB8888(&y, &cb, &cr, &out, &sys->yuvToRgb, map,
+			                                           0xFF, kvImageDoNotTile) == kvImageNoError)
+				continue;
+		}
+
+		const prim_size_t roi = { width, height };
+		if (prims->YUV420ToRGB_8u_P3AC4R(yuv, h264->iStride, dst, nDstStep, DstFormat, &roi) !=
+		    PRIMITIVES_SUCCESS)
+			return -1002;
+	}
+	return 1;
+}
+
 static void videotoolbox_uninit(H264_CONTEXT* h264)
 {
 	WINPR_ASSERT(h264);
@@ -563,6 +662,7 @@ static void videotoolbox_uninit(H264_CONTEXT* h264)
 		free(sys->pps[x].data);
 	free(sys);
 	h264->pSystemData = nullptr;
+	h264->rgbOutput = FALSE;
 }
 
 WINPR_ATTR_NODISCARD
@@ -573,16 +673,50 @@ static BOOL videotoolbox_init(H264_CONTEXT* h264)
 	/* Let registration continue to an encoder-capable backend for compressor contexts. */
 	if (h264->Compressor)
 		return FALSE;
+
+	/* FREERDP_VIDEOTOOLBOX=off falls back to the next backend, =yuv converts with the
+	 * generic YUV420ToRGB primitive instead of vImage. */
+	char* mode = GetEnvAlloc("FREERDP_VIDEOTOOLBOX");
+	const BOOL disabled = mode && ((_stricmp(mode, "off") == 0) || (strcmp(mode, "0") == 0));
+	const BOOL vimage = !mode || (_stricmp(mode, "yuv") != 0);
+	free(mode);
+	if (disabled)
+		return FALSE;
+
 	H264_CONTEXT_VIDEOTOOLBOX* sys = calloc(1, sizeof(*sys));
 	if (!sys)
 		return FALSE;
+
+	/* The same full range BT.709 coefficients as YUV2R/YUV2G/YUV2B in prim_internal.h */
+	const vImage_YpCbCrToARGBMatrix matrix = { .Yp = 1.0f,
+	                                           .Cr_R = 403.0f / 256.0f,
+	                                           .Cr_G = -120.0f / 256.0f,
+	                                           .Cb_G = -48.0f / 256.0f,
+	                                           .Cb_B = 475.0f / 256.0f };
+	const vImage_YpCbCrPixelRange range = { .Yp_bias = 0,
+	                                        .CbCr_bias = 128,
+	                                        .YpRangeMax = 255,
+	                                        .CbCrRangeMax = 255,
+	                                        .YpMax = 255,
+	                                        .YpMin = 0,
+	                                        .CbCrMax = 255,
+	                                        .CbCrMin = 0 };
+	if (vImageConvert_YpCbCrToARGB_GenerateConversion(&matrix, &range, &sys->yuvToRgb,
+	                                                  kvImage420Yp8_Cb8_Cr8, kvImageARGB8888,
+	                                                  kvImageNoFlags) != kvImageNoError)
+	{
+		free(sys);
+		return FALSE;
+	}
 	sys->needsIdr = TRUE;
 	h264->pSystemData = sys;
 	h264->hwAccel = FALSE;
+	h264->rgbOutput = vimage;
 	/* The actual session is created lazily when the stream supplies SPS/PPS. */
 	return TRUE;
 }
 
-const H264_CONTEXT_SUBSYSTEM g_Subsystem_VideoToolbox = { "VideoToolbox", videotoolbox_init,
-	                                                      videotoolbox_uninit,
-	                                                      videotoolbox_decompress, nullptr };
+const H264_CONTEXT_SUBSYSTEM g_Subsystem_VideoToolbox = {
+	"VideoToolbox",          videotoolbox_init, videotoolbox_uninit,
+	videotoolbox_decompress, nullptr,           videotoolbox_decompress_to_rgb
+};

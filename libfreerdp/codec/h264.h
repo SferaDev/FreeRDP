@@ -40,6 +40,12 @@ extern "C"
 	                                        const UINT32* WINPR_RESTRICT pStride,
 	                                        BYTE** WINPR_RESTRICT ppDstData,
 	                                        UINT32* WINPR_RESTRICT pDstSize);
+	typedef int (*pfnH264SubsystemDecompressToRGB)(H264_CONTEXT* WINPR_RESTRICT h264,
+	                                               const BYTE* WINPR_RESTRICT pSrcData,
+	                                               UINT32 SrcSize, BYTE* WINPR_RESTRICT pDstData,
+	                                               DWORD DstFormat, UINT32 nDstStep,
+	                                               const RECTANGLE_16* WINPR_RESTRICT regionRects,
+	                                               UINT32 numRegionRects);
 
 	struct S_H264_CONTEXT_SUBSYSTEM
 	{
@@ -48,6 +54,9 @@ extern "C"
 		pfnH264SubsystemUninit Uninit;
 		WINPR_ATTR_NODISCARD pfnH264SubsystemDecompress Decompress;
 		WINPR_ATTR_NODISCARD pfnH264SubsystemCompress Compress;
+		/* Optional AVC420 path that writes the region rects straight into pDstData,
+		 * used while the context has rgbOutput set. */
+		WINPR_ATTR_NODISCARD pfnH264SubsystemDecompressToRGB DecompressToRGB;
 	};
 
 	struct S_H264_CONTEXT
@@ -88,6 +97,8 @@ extern "C"
 
 		UINT32 YUVWidth;
 		UINT32 YUVHeight;
+
+		BOOL rgbOutput;
 	};
 
 	WINPR_ATTR_NODISCARD
