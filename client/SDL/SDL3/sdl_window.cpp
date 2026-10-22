@@ -241,6 +241,11 @@ void SdlWindow::resizeable(bool use)
 
 void SdlWindow::fullscreen(bool enter, bool forceOriginalDisplay)
 {
+	/* Session windows are created full screen on their display already. */
+	const bool isFullscreen = (SDL_GetWindowFlags(_window) & SDL_WINDOW_FULLSCREEN) != 0;
+	if ((enter == isFullscreen) &&
+	    (!enter || !forceOriginalDisplay || (SDL_GetDisplayForWindow(_window) == _displayID)))
+		return;
 	if (enter && forceOriginalDisplay && _displayID != 0)
 	{
 		/* Move the window to the desired display. We should not wait
