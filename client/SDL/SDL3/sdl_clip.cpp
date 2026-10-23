@@ -1236,6 +1236,18 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 
 const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* size)
 {
+	/* winpr's text conversions count the terminating NUL, and SDL hands the local clipboard
+	 * exactly size bytes, so without this every pasted text ends in a NUL character. */
+	auto textSizeWithoutTerminator = [](const char* mime, const void* data, uint32_t len)
+	{
+		if (!mime_is_text(mime))
+			return len;
+		auto bytes = static_cast<const char*>(data);
+		while ((len > 0) && (bytes[len - 1] == '\0'))
+			len--;
+		return len;
+	};
+
 	auto clip = static_cast<sdlClip*>(userdata);
 	WINPR_ASSERT(clip);
 	WINPR_ASSERT(size);
@@ -1276,6 +1288,7 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 		if (fptr)
 		{
 			auto ptr = std::shared_ptr<void>(fptr, free);
+			fsize = textSizeWithoutTerminator(mime_type, fptr, fsize);
 			clip->_cache_data.insert({ mime_type, { fsize, ptr } });
 
 			auto fcache = clip->_cache_data.find(mime_type);
@@ -1352,6 +1365,7 @@ const void* sdlClip::ClipDataCb(void* userdata, const char* mime_type, size_t* s
 			}
 
 			auto ptr = std::shared_ptr<void>(data, free);
+			len = textSizeWithoutTerminator(mime_type, data, len);
 			clip->_cache_data.insert({ mime_type, { len, ptr } });
 			*size = len;
 			return ptr.get();
