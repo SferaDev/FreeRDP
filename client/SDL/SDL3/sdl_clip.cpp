@@ -168,6 +168,13 @@ static const char s_mime_freerdp_update[] = "x-special/freerdp-clipboard-update"
 
 static const char* s_type_HtmlFormat = "HTML Format";
 static const char* s_type_FileGroupDescriptorW = "FileGroupDescriptorW";
+/* The name Windows registers for PNG: it keeps alpha, unlike CF_DIB */
+static const char s_type_PNG[] = "PNG";
+
+[[nodiscard]] static bool isPngFormatName(const char* name)
+{
+	return name && ((_stricmp(name, s_type_PNG) == 0) || (strcmp(name, s_mime_png) == 0));
+}
 
 class ClipboardLockGuard
 {
@@ -454,6 +461,8 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 				clientFormatNames.emplace_back(s_type_HtmlFormat);
 				imgPushed = true;
 			}
+			if (local_mime == mime_png)
+				clientFormatNames.emplace_back(s_type_PNG);
 			clientFormatNames.push_back(local_mime);
 		}
 		else if (mime_is_file(local_mime))
@@ -621,8 +630,28 @@ std::string sdlClip::getServerFormat(uint32_t id)
 	return "";
 }
 
+bool sdlClip::serverHasFormat(uint32_t id) const
+{
+	return std::any_of(_serverFormats.begin(), _serverFormats.end(),
+	                   [id](const CliprdrFormat& fmt) { return fmt.formatId() == id; });
+}
+
 uint32_t sdlClip::serverIdForMime(const std::string& mime)
 {
+	if (mime == s_mime_png)
+	{
+		/* PNG is passed through untouched, a DIBV5 at least carries alpha */
+		for (auto& format : _serverFormats)
+		{
+			if (isPngFormatName(format.formatName()))
+				return format.formatId();
+		}
+#if defined(WINPR_UTILS_IMAGE_DIBv5)
+		if (serverHasFormat(CF_DIBV5))
+			return CF_DIBV5;
+#endif
+	}
+
 	std::string cmp = mime;
 	if (mime_is_html(mime))
 		cmp = s_type_HtmlFormat;
@@ -638,7 +667,13 @@ uint32_t sdlClip::serverIdForMime(const std::string& mime)
 	}
 
 	if (mime_is_image(mime))
+	{
+#if defined(WINPR_UTILS_IMAGE_DIBv5)
+		if (!serverHasFormat(CF_DIB) && serverHasFormat(CF_DIBV5))
+			return CF_DIBV5;
+#endif
 		return CF_DIB;
+	}
 	if (mime_is_text(mime))
 		return CF_UNICODETEXT;
 
@@ -733,6 +768,7 @@ UINT sdlClip::ReceiveServerFormatList(CliprdrClientContext* context,
 					break;
 
 				case CF_DIB:
+				case CF_DIBV5:
 					image = TRUE;
 					break;
 
@@ -740,6 +776,8 @@ UINT sdlClip::ReceiveServerFormatList(CliprdrClientContext* context,
 					break;
 			}
 		}
+		if (isPngFormatName(format->formatName))
+			image = TRUE;
 	}
 
 	clipboard->_current_mimetypes.clear();
@@ -865,6 +903,12 @@ std::shared_ptr<BYTE> sdlClip::getLocalData(uint32_t formatId, uint32_t& len)
 
 		case CF_DIB:
 		case CF_DIBV5:
+#if defined(__APPLE__)
+			/* winpr answers a CF_DIBV5 with a plain BITMAPINFOHEADER and no alpha mask;
+			 * getLocalImageAsDib below builds a real one. */
+			if (formatId == CF_DIBV5)
+				break;
+#endif
 			/* Every convertible type on offer (screenshot tools offer image/png only, never
 			 * image/bmp), in case a decoder rejects one of them. */
 			for (const auto& mime : s_mime_dib_sources())
@@ -895,7 +939,9 @@ std::shared_ptr<BYTE> sdlClip::getLocalData(uint32_t formatId, uint32_t& len)
 				ClipboardLockGuard systemlock(_system);
 				std::scoped_lock lock(_lock);
 				const char* formatName = ClipboardGetFormatName(_system, formatId);
-				if (formatName && hasMime(offered, formatName))
+				if (isPngFormatName(formatName) && hasMime(offered, s_mime_png))
+					candidates.push_back({ s_mime_png, Store::Requested });
+				else if (formatName && hasMime(offered, formatName))
 				{
 					/* the name is owned by _system and outlives this function */
 					candidates.push_back({ formatName, Store::Lookup });
@@ -1157,6 +1203,10 @@ UINT sdlClip::ReceiveFormatDataResponse(CliprdrClientContext* context,
 					else if (name == s_type_HtmlFormat)
 					{
 						srcFormatId = ClipboardGetFormatId(clipboard->_system, s_type_HtmlFormat);
+					}
+					else if (isPngFormatName(name.c_str()))
+					{
+						srcFormatId = ClipboardRegisterFormat(clipboard->_system, s_mime_png);
 					}
 				}
 			}

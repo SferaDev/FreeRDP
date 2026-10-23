@@ -102,6 +102,7 @@ class sdlClip
 	[[nodiscard]] UINT SendDataRequest(uint32_t formatID, const std::string& mime);
 
 	[[nodiscard]] std::string getServerFormat(uint32_t id);
+	[[nodiscard]] bool serverHasFormat(uint32_t id) const;
 	[[nodiscard]] uint32_t serverIdForMime(const std::string& mime);
 
 	[[nodiscard]] bool contains(const char** mime_types, Sint32 count);
