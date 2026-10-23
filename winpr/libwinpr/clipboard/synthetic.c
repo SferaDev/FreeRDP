@@ -395,7 +395,8 @@ static void* clipboard_synthesize_image_bmp(WINPR_ATTR_UNUSED wClipboard* clipbo
 {
 	UINT32 SrcSize = *pSize;
 
-	if (dstFormatId == CF_DIB)
+	/* A BITMAPV5HEADER is a longer BITMAPINFOHEADER: both only lack the file header */
+	if ((dstFormatId == CF_DIB) || (dstFormatId == CF_DIBV5))
 	{
 		if (SrcSize < sizeof(BITMAPINFOHEADER))
 			return nullptr;
@@ -409,16 +410,6 @@ static void* clipboard_synthesize_image_bmp(WINPR_ATTR_UNUSED wClipboard* clipbo
 
 		return clipboard_prepend_bmp_header(&header, offset, data, SrcSize, pSize);
 	}
-#if defined(WINPR_UTILS_IMAGE_DIBv5)
-	else if (dstFormatId == CF_DIBV5)
-	{
-		WLog_ERR(TAG,
-		         "Unuspported destination format %s [0x%04" PRIx32
-		         "], trying to convert from %s [0x%04" PRIx32 "]",
-		         ClipboardGetFormatName(clipboard, dstFormatId), dstFormatId,
-		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
-	}
-#endif
 	else
 	{
 		WLog_ERR(TAG,
@@ -450,6 +441,35 @@ static BOOL format_is_image(wClipboard* clipboard, UINT32 formatId)
 					return TRUE;
 			}
 			return FALSE;
+	}
+}
+
+WINPR_ATTR_MALLOC(free, 1)
+static void* clipboard_synthesize_cf_dib(const void* pvdata, size_t dataLen, UINT32* pSize);
+
+/* 32 bpp BI_RGB bitmaps from Windows applications usually leave the alpha byte at 0. Converted
+ * as is, they would turn into fully transparent images. */
+static void image_fix_missing_alpha(wImage* img)
+{
+	WINPR_ASSERT(img);
+	if ((img->bitsPerPixel != 32) || (img->bytesPerPixel != 4) || !img->data)
+		return;
+
+	for (size_t y = 0; y < img->height; y++)
+	{
+		const BYTE* line = &img->data[y * img->scanline];
+		for (size_t x = 0; x < img->width; x++)
+		{
+			if (line[x * 4 + 3] != 0)
+				return;
+		}
+	}
+
+	for (size_t y = 0; y < img->height; y++)
+	{
+		BYTE* line = &img->data[y * img->scanline];
+		for (size_t x = 0; x < img->width; x++)
+			line[x * 4 + 3] = 0xFF;
 	}
 }
 
@@ -510,8 +530,19 @@ static void* clipboard_synthesize_image_dib_to_format(wClipboard* clipboard, UIN
 	if (winpr_image_read_buffer(img, bmp, SrcSize) <= 0)
 		goto fail;
 
+	image_fix_missing_alpha(img);
+
 	result = winpr_image_write_buffer(img, format, &dsize);
-	if (result)
+	if (result && (dstFormatId == CF_DIB))
+	{
+		/* CF_DIB carries no BITMAPFILEHEADER */
+		void* dib = nullptr;
+		if (dsize <= UINT32_MAX)
+			dib = clipboard_synthesize_cf_dib(result, dsize, pSize);
+		free(result);
+		result = dib;
+	}
+	else if (result)
 	{
 		if (dsize <= UINT32_MAX)
 			*pSize = (UINT32)dsize;

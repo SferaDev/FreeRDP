@@ -158,6 +158,145 @@ static BOOL test_dib_offsets(void)
 	                           256 * sizeof(RGBQUAD));
 }
 
+#if defined(WINPR_UTILS_IMAGE_PNG)
+/* A 2x1 32 bpp DIB, bottom-up, pixels given as BGRA */
+static size_t write_dib_2x1(BYTE* dst, size_t dstSize, BOOL v5, const BYTE px[8])
+{
+	const size_t headerSize = v5 ? sizeof(BITMAPV5HEADER) : sizeof(BITMAPINFOHEADER);
+	if (dstSize < headerSize + 8)
+		return 0;
+
+	wStream sbuffer = WINPR_C_ARRAY_INIT;
+	wStream* s = Stream_StaticInit(&sbuffer, dst, dstSize);
+	Stream_Write_UINT32(s, (UINT32)headerSize);
+	Stream_Write_INT32(s, 2);  /* width */
+	Stream_Write_INT32(s, 1);  /* height */
+	Stream_Write_UINT16(s, 1); /* planes */
+	Stream_Write_UINT16(s, 32);
+	Stream_Write_UINT32(s, v5 ? BI_BITFIELDS : BI_RGB);
+	Stream_Write_UINT32(s, 8); /* image size */
+	Stream_Zero(s, 16);
+	if (v5)
+	{
+		Stream_Write_UINT32(s, 0x00FF0000); /* red mask */
+		Stream_Write_UINT32(s, 0x0000FF00); /* green mask */
+		Stream_Write_UINT32(s, 0x000000FF); /* blue mask */
+		Stream_Write_UINT32(s, 0xFF000000); /* alpha mask */
+		Stream_Write_UINT32(s, 0x73524742); /* LCS_sRGB */
+		Stream_Zero(s, headerSize - Stream_GetPosition(s));
+	}
+	Stream_Write(s, px, 8);
+	return Stream_GetPosition(s);
+}
+
+/* Converts a 2x1 DIB to image/png and decodes it again, returning the BGRA pixels */
+WINPR_ATTR_NODISCARD
+static BOOL dib_to_png_pixels(UINT32 dibFormat, const BYTE px[8], BYTE out[8])
+{
+	BOOL rc = FALSE;
+	BYTE dib[sizeof(BITMAPV5HEADER) + 8] = WINPR_C_ARRAY_INIT;
+	const size_t dibSize = write_dib_2x1(dib, sizeof(dib), dibFormat == CF_DIBV5, px);
+
+	wClipboard* clipboard = ClipboardCreate();
+	wImage* img = winpr_image_new();
+	if (!clipboard || !img || (dibSize == 0))
+		goto fail;
+	if (!test_ClipboardSetData(clipboard, dibFormat, dib, (UINT32)dibSize))
+		goto fail;
+
+	{
+		UINT32 pngSize = 0;
+		BYTE* png =
+		    test_ClipboardGetData(clipboard, ClipboardRegisterFormat(clipboard, "image/png"), &pngSize);
+		if (!png)
+			goto fail;
+		const int res = winpr_image_read_buffer(img, png, pngSize);
+		free(png);
+		if ((res <= 0) || (img->width != 2) || (img->height != 1) || (img->bytesPerPixel != 4))
+		{
+			test_log("decoded png: res=%d %" PRIu32 "x%" PRIu32 " %" PRIu32 " Bpp", res, img->width,
+			         img->height, img->bytesPerPixel);
+			goto fail;
+		}
+		memcpy(out, img->data, 8);
+	}
+	rc = TRUE;
+
+fail:
+	winpr_image_free(img, TRUE);
+	ClipboardDestroy(clipboard);
+	return rc;
+}
+
+WINPR_ATTR_NODISCARD
+static BOOL test_dib_to_png_alpha(void)
+{
+	const BYTE translucent[8] = { 0x10, 0x20, 0x30, 0x40, 0x40, 0x50, 0x60, 0xFF };
+	const BYTE noAlpha[8] = { 0x10, 0x20, 0x30, 0x00, 0x40, 0x50, 0x60, 0x00 };
+	const BYTE opaque[8] = { 0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0xFF };
+	BYTE out[8] = WINPR_C_ARRAY_INIT;
+
+	if (!dib_to_png_pixels(CF_DIB, translucent, out) || (memcmp(out, translucent, 8) != 0))
+	{
+		test_log("CF_DIB alpha lost on the way to image/png");
+		return FALSE;
+	}
+	if (!dib_to_png_pixels(CF_DIB, noAlpha, out) || (memcmp(out, opaque, 8) != 0))
+	{
+		test_log("CF_DIB without alpha did not turn into an opaque image/png");
+		return FALSE;
+	}
+#if defined(WINPR_UTILS_IMAGE_DIBv5)
+	if (!dib_to_png_pixels(CF_DIBV5, translucent, out) || (memcmp(out, translucent, 8) != 0))
+	{
+		test_log("CF_DIBV5 alpha lost on the way to image/png");
+		return FALSE;
+	}
+#endif
+	return TRUE;
+}
+#endif
+
+#if defined(WINPR_UTILS_IMAGE_DIBv5)
+WINPR_ATTR_NODISCARD
+static BOOL test_dibv5_to_dib(void)
+{
+	BOOL rc = FALSE;
+	BYTE dib[sizeof(BITMAPV5HEADER) + 4] = WINPR_C_ARRAY_INIT;
+	wStream sbuffer = WINPR_C_ARRAY_INIT;
+	wStream* s = Stream_StaticInit(&sbuffer, dib, sizeof(dib));
+	write_dib_info_header(s, sizeof(BITMAPV5HEADER), 32, BI_BITFIELDS);
+	Stream_Write_UINT32(s, 0x00FF0000); /* red mask */
+	Stream_Write_UINT32(s, 0x0000FF00); /* green mask */
+	Stream_Write_UINT32(s, 0x000000FF); /* blue mask */
+	Stream_Write_UINT32(s, 0xFF000000); /* alpha mask */
+	Stream_Zero(s, sizeof(BITMAPV5HEADER) - Stream_GetPosition(s));
+	Stream_Write_UINT32(s, 0x80123456); /* pixel */
+
+	wClipboard* clipboard = ClipboardCreate();
+	if (!clipboard)
+		return FALSE;
+	if (!test_ClipboardSetData(clipboard, CF_DIBV5, dib, sizeof(dib)))
+		goto fail;
+
+	{
+		UINT32 size = 0;
+		BYTE* out = test_ClipboardGetData(clipboard, CF_DIB, &size);
+		/* a CF_DIB starts with its info header, never with a "BM" file header */
+		rc = out && (size >= sizeof(BITMAPINFOHEADER) + 4) && (out[0] != 'B') &&
+		     (out[0] == sizeof(BITMAPINFOHEADER));
+		if (!rc)
+			test_log("CF_DIBV5 to CF_DIB returned %" PRIu32 " bytes starting 0x%02" PRIx8, size,
+			         out ? out[0] : 0);
+		free(out);
+	}
+
+fail:
+	ClipboardDestroy(clipboard);
+	return rc;
+}
+#endif
+
 WINPR_ATTR_NODISCARD
 static BOOL test_text_leading_newline(void)
 {
@@ -510,6 +649,15 @@ int TestClipboardFormats(int argc, char* argv[])
 
 	if (!test_dib_offsets())
 		goto fail;
+
+#if defined(WINPR_UTILS_IMAGE_PNG)
+	if (!test_dib_to_png_alpha())
+		goto fail;
+#endif
+#if defined(WINPR_UTILS_IMAGE_DIBv5)
+	if (!test_dibv5_to_dib())
+		goto fail;
+#endif
 
 	rc = 0;
 
