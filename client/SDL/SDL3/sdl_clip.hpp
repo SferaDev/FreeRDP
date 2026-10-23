@@ -105,7 +105,7 @@ class sdlClip
 	[[nodiscard]] uint32_t serverIdForMime(const std::string& mime);
 
 	[[nodiscard]] bool contains(const char** mime_types, Sint32 count);
-	[[nodiscard]] bool ownsClipboard() const;
+	[[nodiscard]] bool ownsClipboard(const std::vector<std::string>& local) const;
 
 	[[nodiscard]] static UINT MonitorReady(CliprdrClientContext* context,
 	                                       const CLIPRDR_MONITOR_READY* monitorReady);
@@ -118,6 +118,11 @@ class sdlClip
 	ReceiveFormatListResponse(CliprdrClientContext* context,
 	                          const CLIPRDR_FORMAT_LIST_RESPONSE* formatListResponse);
 	[[nodiscard]] std::shared_ptr<BYTE> getLocalData(uint32_t formatId, uint32_t& len);
+#if defined(__APPLE__)
+	[[nodiscard]] std::shared_ptr<BYTE> getLocalImageAsDib(const std::vector<std::string>& offered,
+	                                                       bool v5, uint32_t& len);
+#endif
+	static void NotifyLocalChange(void* userdata);
 	[[nodiscard]] static UINT
 	ReceiveFormatDataRequest(CliprdrClientContext* context,
 	                         const CLIPRDR_FORMAT_DATA_REQUEST* formatDataRequest);
@@ -168,4 +173,8 @@ class sdlClip
 	bool _reading_server = false;
 	std::string _uuid;
 	std::string _mime_uuid;
+	/* main thread only: NSPasteboard change count after our last write, and the last one
+	 * announced to the server */
+	long _pasteboard_own = -1;
+	long _pasteboard_announced = -1;
 };

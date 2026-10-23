@@ -59,12 +59,14 @@ set(SRCS
     sdl_x11.cpp
     sdl_scroll_macos.hpp
     sdl_display_macos.hpp
+    sdl_clip_macos.hpp
 )
 
 if(APPLE)
-  list(APPEND SRCS sdl_scroll_macos.mm sdl_display_macos.mm)
+  list(APPEND SRCS sdl_scroll_macos.mm sdl_display_macos.mm sdl_clip_macos.mm)
   set_source_files_properties(
-    sdl_scroll_macos.mm sdl_display_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+    sdl_scroll_macos.mm sdl_display_macos.mm sdl_clip_macos.mm PROPERTIES COMPILE_OPTIONS
+                                                                          "-fobjc-arc"
   )
 endif()
 
@@ -167,7 +169,18 @@ if(APPLE)
   find_library(COREVIDEO_LIBRARY CoreVideo REQUIRED)
   find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)
   find_library(APPKIT_LIBRARY AppKit REQUIRED)
-  list(APPEND LIBS ${COREGRAPHICS_LIBRARY} ${COREVIDEO_LIBRARY} ${COREFOUNDATION_LIBRARY} ${APPKIT_LIBRARY})
+  find_library(IMAGEIO_LIBRARY ImageIO REQUIRED)
+  find_library(UTI_LIBRARY UniformTypeIdentifiers REQUIRED)
+  list(
+    APPEND
+    LIBS
+    ${COREGRAPHICS_LIBRARY}
+    ${COREVIDEO_LIBRARY}
+    ${COREFOUNDATION_LIBRARY}
+    ${APPKIT_LIBRARY}
+    ${IMAGEIO_LIBRARY}
+    ${UTI_LIBRARY}
+  )
 endif()
 
 target_link_libraries(${MODULE_NAME} PRIVATE ${LIBS})
@@ -187,3 +200,7 @@ installwithrpath(TARGETS ${MODULE_NAME} DESTINATION ${CMAKE_INSTALL_BINDIR} COMP
 install_freerdp_desktop("${MODULE_NAME}" "${SDL_CLIENT_UUID}")
 
 add_subdirectory(man)
+
+if((BUILD_TESTING_INTERNAL OR BUILD_TESTING) AND APPLE)
+  add_subdirectory(test)
+endif()

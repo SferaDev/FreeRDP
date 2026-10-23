@@ -31,6 +31,9 @@
 
 #include "sdl_clip.hpp"
 #include "sdl_context.hpp"
+#if defined(__APPLE__)
+#include "sdl_clip_macos.hpp"
+#endif
 
 #define TAG CLIENT_TAG("sdl.cliprdr")
 
@@ -122,9 +125,13 @@ static const char s_mime_html[] = "text/html";
 
 /* The mime types SDL has cached for the current clipboard owner. Unlike SDL_HasClipboardData
  * this does no clipboard I/O: on X11, SDL_HasClipboardData transfers the data, and calls our
- * own ClipDataCb when we are the owner. */
+ * own ClipDataCb when we are the owner. On macOS SDL's cache goes stale (see
+ * sdl_clip_macos.hpp), so read the pasteboard's types, which transfers no data either. */
 [[nodiscard]] static std::vector<std::string> localMimeTypes()
 {
+#if defined(__APPLE__)
+	return sdl::clip::macos::mimeTypes();
+#else
 	std::vector<std::string> list;
 	size_t count = 0;
 	auto mimes = SDL_GetClipboardMimeTypes(&count);
@@ -135,6 +142,7 @@ static const char s_mime_html[] = "text/html";
 	}
 	SDL_free(static_cast<void*>(mimes));
 	return list;
+#endif
 }
 
 [[nodiscard]] static bool hasMime(const std::vector<std::string>& list, const char* mime)
@@ -226,12 +234,27 @@ bool sdlClip::init(CliprdrClientContext* clip)
 	_ctx->ServerFormatDataRequest = sdlClip::ReceiveFormatDataRequest;
 	_ctx->ServerFormatDataResponse = sdlClip::ReceiveFormatDataResponse;
 
+#if defined(__APPLE__)
+	if (!sdl::clip::macos::startMonitor(0.25, sdlClip::NotifyLocalChange, nullptr))
+		return false;
+#endif
 	return cliprdr_file_context_init(_file, _ctx);
+}
+
+/* Handled like SDL's own update: handleEvent reads the pasteboard and drops repeats. */
+void sdlClip::NotifyLocalChange(WINPR_ATTR_UNUSED void* userdata)
+{
+	SDL_Event ev = { SDL_EVENT_CLIPBOARD_UPDATE };
+	ev.clipboard.owner = false;
+	std::ignore = SDL_PushEvent(&ev);
 }
 
 bool sdlClip::uninit(CliprdrClientContext* clip)
 {
 	WINPR_ASSERT(clip);
+#if defined(__APPLE__)
+	sdl::clip::macos::stopMonitor();
+#endif
 	if (!cliprdr_file_context_uninit(_file, _ctx))
 		return false;
 	ClipboardLockGuard systemlock(_system);
@@ -252,24 +275,47 @@ bool sdlClip::contains(const char** mime_types, Sint32 count)
 	return false;
 }
 
-bool sdlClip::ownsClipboard() const
+bool sdlClip::ownsClipboard(const std::vector<std::string>& local) const
 {
-	return hasMime(localMimeTypes(), _mime_uuid.c_str());
+#if defined(__APPLE__)
+	/* The pasteboard lists our marker type under an identifier SDL derived from it; the change
+	 * count after our last write is exact. */
+	WINPR_UNUSED(local);
+	return sdl::clip::macos::changeCount() == _pasteboard_own;
+#else
+	return hasMime(local, _mime_uuid.c_str());
+#endif
 }
 
 bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 {
-	std::unique_ptr<char*, decltype(&SDL_free)> current(nullptr, SDL_free);
 	const char** mime_types = ev.mime_types;
 	size_t nformats = WINPR_ASSERTING_INT_CAST(size_t, ev.num_mime_types);
+
+	std::vector<std::string> local;
+	std::vector<const char*> localPtrs;
+	auto useLocalMimeTypes = [&]()
+	{
+		local = localMimeTypes();
+#if defined(__APPLE__)
+		/* announce nothing, so the server also drops what we offered before */
+		if (sdl::clip::macos::isConcealed(local))
+			local.clear();
+#endif
+		for (const auto& m : local)
+			localPtrs.push_back(m.c_str());
+		mime_types = localPtrs.data();
+		nformats = localPtrs.size();
+	};
+
 	if (_ctx && _sync && ev.owner && (ev.num_mime_types == 1))
 	{
 		if (strcmp(first_announcement[0], ev.mime_types[0]) == 0)
 		{
-			current.reset(SDL_GetClipboardMimeTypes(&nformats));
-			mime_types = const_cast<const char**>(current.get());
-			if (!mime_types)
-				nformats = 0;
+#if defined(__APPLE__)
+			_pasteboard_announced = sdl::clip::macos::changeCount();
+#endif
+			useLocalMimeTypes();
 		}
 	}
 	else if (!_ctx || !_sync || ev.owner)
@@ -294,9 +340,26 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 		for (const auto& m : mimes)
 			cmimes.push_back(m.c_str());
 		/* SDL copies the mime type strings */
-		return SDL_SetClipboardData(sdlClip::ClipDataCb, sdlClip::ClipCleanCb, this, cmimes.data(),
-		                            cmimes.size());
+		const bool rc = SDL_SetClipboardData(sdlClip::ClipDataCb, sdlClip::ClipCleanCb, this,
+		                                     cmimes.data(), cmimes.size());
+#if defined(__APPLE__)
+		if (rc)
+			_pasteboard_own = sdl::clip::macos::changeCount();
+#endif
+		return rc;
 	}
+#if defined(__APPLE__)
+	else
+	{
+		/* Both our monitor and SDL (when a window becomes key) report a change, and the
+		 * mime types SDL passes may describe an older one: go by the pasteboard. */
+		const long count = sdl::clip::macos::changeCount();
+		if ((count == _pasteboard_own) || (count == _pasteboard_announced))
+			return true;
+		_pasteboard_announced = count;
+		useLocalMimeTypes();
+	}
+#endif
 
 	if (ev.timestamp == _last_timestamp)
 		return true;
@@ -309,7 +372,7 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 	 * focus-in, racing a server format list. Announcing it would replace the fresh server
 	 * clipboard with the stale local one (and the server would then ask us for data we no
 	 * longer own). A genuine local change cancels our data before its update is queued. */
-	if (ownsClipboard())
+	if (ownsClipboard(localMimeTypes()))
 	{
 		WLog_Print(_log, WLOG_DEBUG, "ignoring stale local clipboard update");
 		return true;
@@ -371,7 +434,7 @@ bool sdlClip::handleEvent(const SDL_ClipboardEvent& ev)
 			if (!imgPushed)
 			{
 				clientFormats.push_back({ CF_DIB, nullptr });
-#if defined(WINPR_UTILS_IMAGE_DIBv5)
+#if defined(WINPR_UTILS_IMAGE_DIBv5) || defined(__APPLE__)
 				clientFormats.push_back({ CF_DIBV5, nullptr });
 #endif
 
@@ -751,11 +814,15 @@ std::shared_ptr<BYTE> sdlClip::getLocalData(uint32_t formatId, uint32_t& len)
 	/* The local clipboard still holds what this session received from the server (the
 	 * server asked before our format list reached it). Reading it through SDL would call
 	 * ClipDataCb and ask the server for its own data, so fail the request instead. */
-	if (hasMime(offered, _mime_uuid.c_str()))
+	if (ownsClipboard(offered))
 	{
 		WLog_Print(_log, WLOG_DEBUG, "local clipboard holds server data, not answering request");
 		return {};
 	}
+#if defined(__APPLE__)
+	if (sdl::clip::macos::isConcealed(offered))
+		return {};
+#endif
 
 	UINT32 fileFormatId = 0;
 	UINT32 htmlFormatId = 0;
@@ -899,8 +966,56 @@ std::shared_ptr<BYTE> sdlClip::getLocalData(uint32_t formatId, uint32_t& len)
 		}
 		break;
 	}
+
+#if defined(__APPLE__)
+	/* winpr converts only BMP here unless built with PNG/WebP/JPEG support, and never TIFF,
+	 * while macOS copies images as PNG and/or TIFF. */
+	if (!data && ((formatId == CF_DIB) || (formatId == CF_DIBV5)))
+		data = getLocalImageAsDib(offered, formatId == CF_DIBV5, len);
+#endif
 	return data;
 }
+
+#if defined(__APPLE__)
+std::shared_ptr<BYTE> sdlClip::getLocalImageAsDib(const std::vector<std::string>& offered, bool v5,
+                                                  uint32_t& len)
+{
+	std::vector<std::string> sources;
+	for (const char* preferred : { s_mime_png, s_mime_tiff })
+	{
+		if (hasMime(offered, preferred))
+			sources.emplace_back(preferred);
+	}
+	for (const auto& mime : offered)
+	{
+		if ((mime.rfind("image/", 0) == 0) && !hasMime(sources, mime.c_str()))
+			sources.push_back(mime);
+	}
+
+	for (const auto& mime : sources)
+	{
+		size_t size = 0;
+		auto sdldata = std::shared_ptr<void>(SDL_GetClipboardData(mime.c_str(), &size), SDL_free);
+		if (!sdldata)
+			continue;
+
+		const auto dib = sdl::clip::macos::imageToDib(sdldata.get(), size, v5);
+		if (dib.empty() || (dib.size() > UINT32_MAX))
+		{
+			WLog_Print(_log, WLOG_DEBUG, "could not convert local %s", mime.c_str());
+			continue;
+		}
+
+		auto ptr = static_cast<BYTE*>(malloc(dib.size()));
+		if (!ptr)
+			return {};
+		memcpy(ptr, dib.data(), dib.size());
+		len = static_cast<uint32_t>(dib.size());
+		return { ptr, free };
+	}
+	return {};
+}
+#endif
 
 UINT sdlClip::ReceiveFormatDataRequest(CliprdrClientContext* context,
                                        const CLIPRDR_FORMAT_DATA_REQUEST* formatDataRequest)
